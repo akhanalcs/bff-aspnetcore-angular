@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/RepairOrders.AppHost/RepairOrders.AppHost.csproj" />
+    <Project Path="src/RepairOrders.Server/RepairOrders.Server.csproj" />
+    <Project Path="src/RepairOrders.ServiceDefaults/RepairOrders.ServiceDefaults.csproj" />
+  </Folder>
+</Solution>

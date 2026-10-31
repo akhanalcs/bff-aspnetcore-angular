@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "skills": {
+    "angular-developer": {
+      "source": "angular/skills",
+      "sourceType": "github",
+      "skillPath": "angular-developer/SKILL.md",
+      "computedHash": "06f89c855e544fe306e8e08cae83a667e54fbb81509e8a1e631bff308f268cbd"
+    },
+    "angular-new-app": {
+      "source": "angular/skills",
+      "sourceType": "github",
+      "skillPath": "angular-new-app/SKILL.md",
+      "computedHash": "49bd84ab08bd3498c52f476bed48fbb942dc6dbc0925607e84549adbed34bccf"
+    },
+    "dotnet-webapi": {
+      "source": "dotnet/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/dotnet-aspnetcore/skills/dotnet-webapi/SKILL.md",
+      "computedHash": "9f9ca386ddefb34ebeaf269c6a7dac0bd0a8e9ea901ad5c489cd4d5e7c61fb22"
+    },
+    "microsoft-code-reference": {
+      "source": "microsoftdocs/mcp",
+      "sourceType": "github",
+      "skillPath": "skills/microsoft-code-reference/SKILL.md",
+      "computedHash": "b8f19fa71bfbb9b6c6e586c9135fbc4baa4df4aa3e2da2398d7db4add6fde1c3"
+    },
+    "microsoft-docs": {
+      "source": "microsoftdocs/mcp",
+      "sourceType": "github",
+      "skillPath": "skills/microsoft-docs/SKILL.md",
+      "computedHash": "0acd8d2629937e021d605fd1426e641295909e13bab47cad1153793f5564e85e"
+    },
+    "optimizing-ef-core-queries": {
+      "source": "dotnet/skills",
+      "sourceType": "github",
+      "skillPath": "plugins/dotnet-data/skills/optimizing-ef-core-queries/SKILL.md",
+      "computedHash": "dd194024f92478a5c74c2690fc7bee08ba8a553acd7056e86050c677c2c767aa"
+    }
+  }
+}
