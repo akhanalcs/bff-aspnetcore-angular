@@ -57,7 +57,7 @@ In dev, Angular runs on its own dev server (`ng serve`) for hot reload. In produ
 
 I use the third one. In a BFF the server owns the session: the sign-in redirect to `/signin-oidc`, the session cookie, the anti-forgery cookie, the security headers and the CSP nonce in `index.html`. If `ng serve` were the front door in dev, none of that would run the way it does in production, and security bugs would only show up after a deploy. With the server in front, dev and production have the same front door and only the source of the UI files changes. The cost is a few YARP routes that exist only in dev.
 
-**In dev.** The server fetches `index.html` from `ng serve` and adds the security bits. YARP forwards the JS, CSS and hot-reload traffic. The browser only ever talks to the server, so everything stays on one origin.
+**In dev, once auth is in (roadmap 3).** The server fetches `index.html` from `ng serve` and adds the security bits. YARP forwards the JS, CSS and hot-reload traffic. The browser only ever talks to the server, so everything stays on one origin.
 
 ```mermaid
 sequenceDiagram
@@ -89,7 +89,7 @@ sequenceDiagram
     S-->>B: JSON
 ```
 
-In damienbod's code, the `_Host` Razor page renders `index.html` in both modes, and `MapReverseProxy()` is only called inside `if (app.Environment.IsDevelopment())`. Until I add auth (step 3), I start simpler: YARP forwards `index.html` too, and production uses `MapFallbackToFile("index.html")`.
+In damienbod's code, the `_Host` Razor page renders `index.html` in both modes, and `MapReverseProxy()` is only called inside `if (app.Environment.IsDevelopment())`. Until I add auth (roadmap 3), I start simpler: YARP forwards `index.html` too (see [4c](#4c-one-origin-with-yarp) for how it runs today), and production uses `MapFallbackToFile("index.html")`.
 
 ## Design decisions
 | Decision | Why | What I didn't pick |
@@ -339,3 +339,95 @@ The two under **Project** come from this repo's `.mcp.json`. The others come wit
 - I first tried Claude Code **plugins** (`/plugin install ...`) for the .NET and Learn pieces, but `/plugin` isn't available in the VS Code extension. Installing the skills with `npx skills` and the MCP server through `.mcp.json` gets the same thing, works in both VS Code and the CLI, and lives in the repo instead of my user profile.
 - I first installed `configure-auth` from `dotnet/skills`, but it's for **Blazor** auth, not a BFF with Angular, so I removed it (`npx skills remove configure-auth`). For Microsoft.Identity.Web I rely on the Learn skills.
 - The skills installer also offers a global `find-skills` skill; I don't need it.
+
+### 4. Run it with Aspire
+I wire things up one piece at a time and run after each one: the server (4a), the Angular app (4b), YARP so both share one origin (4c), then SQL Server and the first API (4d).
+
+#### 4a. The server under Aspire
+The pattern comes from [`aspire-with-javascript`](https://github.com/microsoft/aspire-samples/tree/main/samples/aspire-with-javascript) in `microsoft/aspire-samples`: the AppHost registers the API with `AddProject`, and the API calls `AddServiceDefaults()`.
+
+[`AppHost.cs`](src/RepairOrders.AppHost/AppHost.cs) registers the server:
+```csharp
+var server = builder.AddProject<Projects.RepairOrders_Server>("server")
+    .WithExternalHttpEndpoints()
+    .WithHttpHealthCheck("/health");
+```
+- `Projects.RepairOrders_Server` is a type the Aspire SDK generates from the AppHost's `<ProjectReference>`. The `.` in the name becomes `_`.
+- `WithExternalHttpEndpoints()` **changes nothing locally**; on my machine every endpoint is reachable on `localhost` anyway. It matters at deploy time. Aspire marks the endpoint as external, so in Azure Container Apps the server gets [external ingress](https://learn.microsoft.com/azure/container-apps/ingress-overview#external-and-internal-ingress): a public URL. Without it, the app gets internal ingress, reachable only by other apps in the same Container Apps environment. The server is the only thing a browser talks to, so it's the only resource that gets this. SQL Server and, later, a separate API stay internal.
+- `WithHttpHealthCheck("/health")` makes Aspire poll the server's `/health` endpoint. The dashboard shows real health instead of just "process started", and later `WaitFor(server)` waits until the server is actually ready.
+
+[`Program.cs`](src/RepairOrders.Server/Program.cs) adds `builder.AddServiceDefaults()` (OpenTelemetry, health checks, service discovery, HttpClient resilience) and `app.MapDefaultEndpoints()` (maps `/health` and `/alive`, in Development only).
+
+**Running it.** Either of these:
+- **Terminal:** `aspire run` from the repo root. It stays in the foreground, prints the dashboard link with a login token, and Ctrl+C stops everything. `aspire start` does the same in the background, and `aspire stop` ends it.
+- **VS Code:** with the [Aspire extension](https://aspire.dev/get-started/aspire-vscode-extension/) installed, open `AppHost.cs` and click **Run Aspire AppHost** (or **Debug Aspire AppHost**) in the editor title bar, next to the usual Run button. Debug attaches the C# debugger to the server, so breakpoints work. The Aspire view in the sidebar lists the resources; right-click one to restart it or see its logs.
+
+Both run the same AppHost. I use the extension: **Aspire** view in the sidebar → **Run AppHost**.
+
+What I got: the dashboard at `https://localhost:17010` with `server` **Running** and **Healthy**, `Hello World!` on the server's URL, and the server's logs and traces in the dashboard.
+
+**Bumps:**
+- **Firefox said "Be careful. Something doesn't look right" (`MOZILLA_PKIX_ERROR_SELF_SIGNED_CERT`).** The dashboard uses the ASP.NET Core dev certificate. `dotnet dev-certs https --trust` trusts it in the macOS keychain, which Safari and Chrome use, but Firefox keeps its own certificate store. Firefox's `security.enterprise_roots.enabled` was already `true` and didn't help: it imports certificate *authorities* from the keychain, and the dev certificate is a self-signed leaf, not a CA. So I checked that the certificate Firefox showed was mine (`CN=localhost`, same SHA-1 fingerprint as `dotnet dev-certs https --check --trust`) and clicked **Advanced → Proceed to localhost:17010 (Risky)**. Firefox remembers that exception for `localhost:17010`. It's safe because localhost traffic never leaves my machine.
+
+#### 4b. The Angular app under Aspire
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+aspire add javascript      # adds Aspire.Hosting.JavaScript 13.6.4 to the AppHost
+```
+`Aspire.Hosting.JavaScript` is a **hosting integration**: a NuGet package that teaches the AppHost a new kind of resource. The core AppHost only knows .NET projects, containers and plain executables. This package adds `AddJavaScriptApp`, which knows how to run `npm install` and `npm run <script>`. Only the AppHost uses it; it doesn't ship with the app.
+
+In [`AppHost.cs`](src/RepairOrders.AppHost/AppHost.cs):
+```csharp
+var ui = builder.AddJavaScriptApp("ui", "../ui", runScriptName: "start")
+    .WithNpm()
+    .WithHttpEndpoint(targetPort: 4200);
+```
+- `runScriptName: "start"` → `npm run start` → `"start": "ng serve"` in `src/ui/package.json`.
+- `WithNpm()` runs `npm install` in `src/ui` before each start, as its own resource (`ui-installer` in the dashboard). It installs the app's packages into `node_modules`, not npm itself (mise provides Node and npm). It's quick when nothing changed, and a fresh clone runs without extra setup.
+- `WithHttpEndpoint(targetPort: 4200)` tells Aspire the app listens on 4200, `ng serve`'s default. That gives `ui` a URL in the dashboard and a name (`ui`) the server can look up. Aspire puts its own proxy in front, so the URL shows a different port, which forwards to 4200.
+- No `WithExternalHttpEndpoints()`: the dev server is never deployed. In production the Angular build is served from the server's `wwwroot`.
+
+**Why a fixed port.** The `aspire-with-javascript` sample lets Aspire pick the port and passes it in (`"start": "ng serve --port $PORT"`). I tried that first, but `ng serve` doesn't read a `PORT` variable, so it needed either a shell-specific npm script or an extra `WithArgs` line in the AppHost. Port 4200 needs neither. The cost: 4200 must be free (`ng serve` fails loudly if it isn't), and I can't run two copies at once. For one developer, that's fine.
+
+**Run order of the description.** Code in `AppHost.cs` only *describes* resources. Nothing starts until `builder.Build().Run()`, and then Aspire starts everything at once.
+
+What I got: `ui-installer` **Finished**, then `ui` **Running**, with the Angular welcome page on its URL. The server still answers on its own URL. They're two separate origins until 4c.
+
+#### 4c. One origin with YARP
+The browser should only ever talk to the server. So in dev the server answers what it owns (`/health`, later `/api/*` and sign-in) and forwards everything else to `ng serve` with [YARP direct forwarding](https://learn.microsoft.com/aspnet/core/fundamentals/servers/yarp/direct-forwarding).
+
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+dotnet add src/RepairOrders.Server package Microsoft.Extensions.ServiceDiscovery.Yarp --version 10.10.0
+```
+This is the glue package between Aspire service discovery and YARP. It depends on `Yarp.ReverseProxy` (2.3.0), so YARP comes with it, and it adds `AddHttpForwarderWithServiceDiscovery()`, a YARP forwarder that resolves `http://ui` to wherever Aspire is running the `ui` resource. I pinned 10.10.0 to match `Microsoft.Extensions.ServiceDiscovery` in ServiceDefaults.
+
+- **AppHost:** `ui` is now declared before `server`, and the server gets `.WithReference(ui)`. That hands the server `ui`'s address as config (`services:ui:http:0`), which service discovery reads.
+- **Server:** `builder.Services.AddHttpForwarderWithServiceDiscovery()` and, inside `if (app.Environment.IsDevelopment())`, `app.MapForwarder("/{**catch-all}", "http://ui")`. A catch-all route has the lowest priority in ASP.NET Core routing, so real endpoints like `/health` still win. This is the same idea as Microsoft's [Blazor + Entra BFF sample with YARP and Aspire](https://learn.microsoft.com/aspnet/core/blazor/security/blazor-web-app-with-entra?pivots=with-yarp-and-aspire), which forwards to `https://weatherapi` by resource name. damienbod lists about ten Angular dev routes (`@vite`, `@ng`, `*.js`, …) because a Razor page owns everything else; with one catch-all I don't need them.
+- I removed the template's `MapGet("/", () => "Hello World!")`, or `/` would never reach Angular.
+
+<img src="docs/images/aspire-dashboard-ui-server.png" alt="Aspire dashboard: ui (npm run start) with its ui-installer (npm install, Finished), and server, both Running" width="900">
+
+What the dashboard shows: Aspire started `ui` by running `npm run start` (which runs `ng serve`), after its child resource `ui-installer` ran `npm install` and finished. `server` is the .NET project. Its URL, `https://localhost:7282`, now shows the Angular app: the server forwards those requests to `ng serve` through Aspire's proxy for `ui` (port 51563 here, which forwards to 4200).
+
+How it runs today (no auth yet):
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant S as RepairOrders.Server :7282
+    participant NG as ng serve :4200 (dev only)
+    B->>S: GET /orders
+    Note over S: no endpoint matches, so the catch-all forwards it
+    S->>NG: GET /orders
+    NG-->>B: index.html (ng serve returns it for any app route)
+    B->>S: GET /main.js, /styles.css, live-reload WebSocket
+    S->>NG: forwarded by YARP
+    NG-->>B: files (back through the server)
+    B->>S: GET /health
+    S-->>B: Healthy (the server's own endpoint)
+```
+`/orders` is an **Angular** route (a page), not an API call. `ng serve` returns `index.html` for every path that isn't a file, and Angular's router reads the URL in the browser and shows the right page. API calls use their own prefix, `/api/orders`, so the two never collide.
+
+What I got: the Angular page on the server's URL, `/health` answered by the server, and editing `app.html` live-reloads the page on `:7282`, so the live-reload WebSocket goes through YARP too.
+
+**A trap to fix next:** `curl https://localhost:7282/api/orders` returns `index.html` with `200`, because there's no API yet and the catch-all forwards it. A typo in an API path would look like success to the Angular `HttpClient`. In 4d I map `/api/*` so unknown API paths return `404`.
