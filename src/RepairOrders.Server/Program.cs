@@ -1,10 +1,16 @@
 // RepairOrders.Server: the BFF and the API in one app. Later it also serves the Angular build
 // in production and proxies to `ng serve` in development.
+using RepairOrders.Server.Data;
+
 var builder = WebApplication.CreateBuilder(args);
 
 // From ServiceDefaults: OpenTelemetry (logs, traces, metrics to the dashboard), health checks,
 // service discovery, and retries/timeouts on outgoing HttpClient calls.
 builder.AddServiceDefaults();
+
+// EF Core for the "repairorders" database: reads ConnectionStrings:repairorders (from the AppHost's
+// WithReference), pools DbContexts, retries brief SQL errors, and adds a health check and tracing.
+builder.AddSqlServerDbContext<RepairOrdersDbContext>("repairorders");
 
 // YARP's forwarder, resolving names like `http://ui` through Aspire service discovery.
 builder.Services.AddHttpForwarderWithServiceDiscovery();

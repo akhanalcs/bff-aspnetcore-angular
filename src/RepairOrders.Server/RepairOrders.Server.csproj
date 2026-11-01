@@ -5,7 +5,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <PackageReference Include="Aspire.Microsoft.EntityFrameworkCore.SqlServer" Version="13.6.4" />
     <PackageReference Include="Microsoft.Extensions.ServiceDiscovery.Yarp" Version="10.10.0" />
+    <!-- Security pin. Aspire's EF package (via Microsoft.Data.SqlClient) brings in Pkcs 10.0.12, which has
+      a known DoS vulnerability (NU1903). A direct reference wins over a transitive one, so this patched
+      version is used instead. See: dotnet nuget why src/RepairOrders.Server System.Security.Cryptography.Pkcs
+      Remove once Aspire ships a SqlClient that brings 10.0.13 or later. -->
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.14" />
   </ItemGroup>
 
   <PropertyGroup>

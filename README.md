@@ -12,14 +12,77 @@ I'm building it step by step to show how an enterprise .NET + Angular app fits t
 6. [Azure Verified Modules (Bicep)](https://azure.github.io/Azure-Verified-Modules/indexes/bicep/)
 
 ## How the app works
-A supervisor opens a **repair order** for a truck ("Unit 4127: brakes squealing") and assigns a mechanic. The mechanic adds **labor and parts lines**, marks them done, and **completes** the order.
+A truck comes into a fleet shop: "Unit 4127, brakes squealing." A mechanic opens a **repair order**, or picks an unassigned one from the list and **claims** it. While working, they add **parts** (searching the parts catalog) and **labor lines** (what they did, how long), then **close** the order. A supervisor keeps the shop moving: **reassigns** work and **cancels** orders a customer called off.
+
+**Who can do what** (Entra app roles → authorization policies):
+
+| | Mechanic | Supervisor |
+|---|---|---|
+| See all orders, create an order | ✅ | ✅ |
+| Claim an unassigned order | ✅ | ✅ |
+| Add parts and labor, close the order | Only orders assigned to them | Any order |
+| Reassign an order to another mechanic | | ✅ |
+| Cancel an order (with a reason) | | ✅ |
+| Manage the parts catalog | | Seeded data for now, no screen |
+
+Orders are never deleted. A repair order is a business record (parts used, hours billed), so "the customer changed their mind" is a **Cancelled** status with a reason, and the history stays. A closed or cancelled order is read-only.
+
+**The data model** (where it ends up; I add tables as features need them, each with its own migration):
+```mermaid
+erDiagram
+    RepairOrder ||--o{ PartLine : "uses"
+    RepairOrder ||--o{ LaborLine : "has"
+    Part ||--o{ PartLine : "is used in"
+    Mechanic |o--o{ RepairOrder : "is assigned"
+    RepairOrder {
+        int Id PK
+        string UnitNumber "fleet vehicle, e.g. 4127"
+        string Complaint
+        string Status "Open, InProgress, Closed, Cancelled"
+        int AssignedMechanicId FK "null = unassigned"
+        datetimeoffset CreatedAt
+        datetimeoffset ClosedAt "null until closed"
+        string CancelReason "null unless cancelled"
+        rowversion RowVersion "concurrency token, 409 on conflict"
+    }
+    Mechanic {
+        int Id PK
+        string EntraObjectId "oid claim, added on first sign-in"
+        string DisplayName
+    }
+    Part {
+        int Id PK
+        string PartNumber "unique"
+        string Name
+        decimal UnitPrice
+    }
+    PartLine {
+        int Id PK
+        int RepairOrderId FK
+        int PartId FK
+        int Quantity
+        decimal UnitPrice "copied from Part when added"
+    }
+    LaborLine {
+        int Id PK
+        int RepairOrderId FK
+        string Description
+        decimal Hours
+    }
+```
+- `PartLine.UnitPrice` is a copy, so a later price change in the catalog doesn't rewrite what an old order cost.
+- `Mechanic` only maps a signed-in Entra user to a row the orders can point at. Entra stays the source of truth for who people are and their roles.
 
 | Feature | What it shows |
 |---|---|
-| Order list with a status filter (kept in the URL) | Components, signals, a feature store, routing |
-| Create and edit in a dialog | Angular Material dialogs, typed reactive forms, validation in the UI **and** the API |
-| Complete an order | A business rule (all lines must be done) and a **rowversion** concurrency check that returns **409** |
-| Sign in with Entra ID as a Mechanic or Supervisor | The BFF pattern: cookie session, anti-forgery, app roles and authorization policies |
+| Order list (`/repair-orders`) | Material table with server-side paging and sorting, a status filter kept in the URL, `RepairOrderStore` with signals, loading and error states |
+| New order page (`/repair-orders/new`) | A typed form, validation in the UI **and** the API, ProblemDetails errors on the right fields, an unsaved-changes guard |
+| Order details (`/repair-orders/:id`) | A route parameter, a page component with presentational children, a `computed` parts total |
+| Claim an order | Two mechanics claim the same order at once: the second gets **409** from the **rowversion** check |
+| Add a part (dialog) | Autocomplete: `debounceTime` + `switchMap` → `GET /api/parts?search=…`, turned into a signal with `toSignal` |
+| Add a labor line | A small inline form |
+| Close an order | A business rule (at least one labor line), then read-only |
+| Sign in with Entra ID | The BFF: cookie session, anti-forgery, role-based route guards in Angular, policies and a resource check ("is this order assigned to me?") on the server. Angular never holds a token |
 
 ### Local dev
 The ASP.NET Core server is the **only front door**. The browser always talks to one origin, so the auth cookie just works and there's no CORS. In dev, the server forwards UI requests to the Angular dev server with YARP, so hot reload still works. Aspire starts everything.
@@ -64,28 +127,28 @@ sequenceDiagram
     participant B as Browser
     participant S as RepairOrders.Server
     participant NG as ng serve (dev only)
-    B->>S: GET /orders
+    B->>S: GET /repair-orders
     S->>NG: GET /index.html
     NG-->>S: index.html
     S-->>B: index.html with a CSP nonce, plus the XSRF-RequestToken cookie
     B->>S: GET /main.js, /styles.css, hot-reload WebSocket
     S->>NG: forwarded by YARP
     NG-->>B: files (back through the server)
-    B->>S: GET /api/orders (session cookie + X-XSRF-TOKEN header)
+    B->>S: GET /api/repair-orders (session cookie + X-XSRF-TOKEN header)
     S-->>B: JSON
 ```
 
-**In production.** `ng build` writes static files that end up in the server's `wwwroot`. There's no dev server and no YARP route. Deep links like `/orders/42` still get `index.html`, so Angular's router takes over.
+**In production.** `ng build` writes static files that end up in the server's `wwwroot`. There's no dev server and no YARP route. Deep links like `/repair-orders/42` still get `index.html`, so Angular's router takes over.
 
 ```mermaid
 sequenceDiagram
     participant B as Browser
     participant S as RepairOrders.Server (container)
-    B->>S: GET /orders
+    B->>S: GET /repair-orders
     S-->>B: wwwroot/index.html with a CSP nonce, plus the XSRF-RequestToken cookie
     B->>S: GET /main-ABC123.js, /styles-XYZ.css
     S-->>B: static files from wwwroot
-    B->>S: GET /api/orders (session cookie + X-XSRF-TOKEN header)
+    B->>S: GET /api/repair-orders (session cookie + X-XSRF-TOKEN header)
     S-->>B: JSON
 ```
 
@@ -100,7 +163,9 @@ In damienbod's code, the `_Host` Razor page renders `index.html` in both modes, 
 | **Angular CLI** | Standard tooling. Nothing here needs a monorepo tool | Nx |
 | **Angular Material + CDK** | Free, made by the Angular team, accessible, has dialogs and tables | PrimeNG, or a paid suite (Syncfusion, Kendo, DevExtreme) for heavy data grids |
 | **Plain CSS** with a Material prebuilt theme | Modern CSS has nesting and variables. Components style themselves with Material's `--mat-sys-*` CSS variables, so no Sass build step | SCSS: only needed for a custom Material theme (`mat.theme` mixin), which I can add later as a single file. Tailwind: a second styling system next to Material |
+| **TypeScript types generated from the API's OpenAPI document** ([`openapi-typescript`](https://openapi-ts.dev/)), called from my own small `HttpClient` services | The C# DTOs stay the source of truth, and a renamed field breaks the Angular build instead of failing at runtime. Calls still go through Angular's `HttpClient`, so interceptors (anti-forgery header, 401 → sign in) and `httpResource` work | **Kiota**: Microsoft's generator, but its TypeScript client sends requests with `fetch`, not `HttpClient`, so Angular interceptors don't see them. **NSwag**: generates whole Angular services, but it's tied to its own OpenAPI pipeline, and a big generated service is harder to read than a small hand-written one |
 | **Signals for state, RxJS for streams;** a feature store provided on the route | The modern Angular default, and easy to read | NgRx: worth it when many features share complex state |
+| **EF Core migrations, applied by a separate deploy step** (a [migration bundle](https://learn.microsoft.com/ef/core/managing-schemas/migrations/applying#bundles) built in CI, run before the new app version), never by the app at startup in production | EF Core's [own guidance](https://learn.microsoft.com/ef/core/managing-schemas/migrations/applying): the app runs with a login that can only read and write data, a separate deploy identity changes the schema, and a failed migration stops the release before the new code goes out | Migrating at app startup: simple, but every replica needs schema rights and a bad migration takes the app down. A reviewed **SQL script** (`--idempotent`): the right pick when a DBA must approve the SQL. **DbUp**: hand-written SQL scripts, good when the database isn't owned by EF |
 | **Aspire** for local dev | One command starts the server, Angular and SQL, with a dashboard and traces | docker-compose plus scripts |
 | **Bicep with Azure Verified Modules**, in the azd folder layout | Infra is reviewed code, `what-if` previews changes, and Microsoft maintains the modules | Aspire-generated infra (a quick start, less control); Terraform |
 | **Azure Container Apps** | The same hosting as my order-processing app; one container | App Service: simpler for a single web app |
@@ -118,6 +183,31 @@ Because the Angular app and the server are deployed together on one origin, the 
 **Trade-offs I'd mention:**
 - XSS is still bad. An injected script can call my API *as me* while the page is open. What it can't do is steal a token and use it somewhere else later. So I still add a Content Security Policy and security headers, as damienbod's sample does.
 - The server now holds sessions and tokens. With more than one instance, the token cache has to be shared (a distributed cache) instead of in memory.
+
+### How XSS could happen in this app, and what stops it
+XSS means the attacker's JavaScript runs on *my* page, in *someone else's* browser. Here's how it could happen in this app.
+
+1. A mechanic's account is stolen (a lost tablet that's still signed in). The attacker types this into an order's complaint field: `Brakes squealing <img src=x onerror="fetch('/api/repair-orders/42/reassign', …)">`
+2. The server saves it. It's just text.
+3. A supervisor opens that order. **If** the page turns the text into HTML, the browser runs the `onerror` code as the supervisor.
+4. The script calls my API from the supervisor's own page, so it has the supervisor's cookie *and* can read the anti-forgery token. It can reassign or cancel orders, or read every order and send the data to the attacker's server.
+
+The stolen tablet on its own isn't XSS. That attacker can already do what a mechanic can, and the answers are authorization (a mechanic only changes their own orders), short sessions, and Entra (MFA, revoking sessions). XSS is worse: it **borrows a more powerful user's session**. HttpOnly doesn't stop step 4. It only stops the script from copying the cookie and using it somewhere else later.
+
+**What would make step 3 happen** (in Angular, you have to opt into all of these):
+- Binding user text with `[innerHTML]`, especially with `DomSanitizer.bypassSecurityTrustHtml(...)` ("we wanted bold text in notes")
+- Writing to the DOM directly (`ElementRef.nativeElement.innerHTML = ...`) or through a third-party library that does
+- Building HTML on the server by pasting user input into it (the future `index.html` step must only add a nonce, never user data)
+- A compromised npm package or third-party script: then the attacker's code ships *inside* my bundle and needs no input at all
+
+**What stops it, in layers:**
+1. **Encode on output, not on input.** Angular escapes everything in `{{ }}` and property bindings by default, so the complaint above shows up as text. I never use `bypassSecurityTrust*` on user data. Encoding on *input* (saving `&lt;img&gt;`) is the wrong fix: the data is wrong everywhere else it's used (reports, exports, the API), and it gets double-encoded on display.
+2. **Validate on input** as a second layer: max lengths, required fields and allowed values on the server. It limits what can be stored, but it doesn't replace output encoding.
+3. **Content Security Policy** with a per-request nonce (roadmap 3, like damienbod's sample). Even if markup gets injected, the browser refuses to run scripts that don't carry the nonce, including inline `onerror` handlers.
+4. **Dependency hygiene:** a committed lock file, `npm ci` in CI, `npm audit`, no scripts from CDNs.
+5. **Least privilege:** the server checks every action (role and "is this order assigned to me?"), so a hijacked session can only do what that user could already do.
+
+Sources: Angular's [security guide](https://angular.dev/best-practices/security) and OWASP's [XSS prevention cheat sheet](https://cheatsheetseries.owasp.org/cheatsheets/Cross_Site_Scripting_Prevention_Cheat_Sheet.html).
 
 ### How the session cookie is protected
 | Attribute | What it does |
@@ -137,10 +227,10 @@ SameSite isn't enough on its own. It works per *site*, not per origin, so a sibl
 | What happens | Result |
 |---|---|
 | I sign in at `https://myapp` | The server sets the session cookie: `HttpOnly; Secure; SameSite=Lax` |
-| Angular calls `GET /api/orders` | The browser attaches the cookie; the server reads it and knows who I am. Angular's code never sees it |
+| Angular calls `GET /api/repair-orders` | The browser attaches the cookie; the server reads it and knows who I am. Angular's code never sees it |
 | Something requests `http://myapp` | `Secure`: the cookie isn't sent over plain HTTP, and the server redirects to HTTPS |
 | An injected script on my page reads `document.cookie` | `HttpOnly`: the session cookie isn't there |
-| `evil.example` auto-submits a form that POSTs to `https://myapp/api/orders/42/complete` | `SameSite=Lax`: no cookie, so 401. Even if the cookie were sent, there's no `X-XSRF-TOKEN` header, so 400 |
+| `evil.example` auto-submits a form that POSTs to `https://myapp/api/repair-orders/42/close` | `SameSite=Lax`: no cookie, so 401. Even if the cookie were sent, there's no `X-XSRF-TOKEN` header, so 400 |
 | I click a link to the app in an email | `Lax`: the cookie is sent and I'm still signed in |
 
 Note: a script on *another* site can never read my cookies; the browser's same-origin policy already stops that. `HttpOnly` is about scripts running on *my* page.
@@ -164,13 +254,17 @@ I follow Angular's own [style guide](https://angular.dev/style-guide) and its [b
 
 ## Roadmap
 1. **Local skeleton:** Aspire AppHost, the server, SQL Server, and the Angular app behind YARP. List repair orders. No auth yet.
-2. **One complete feature:** create and edit in a dialog, labor and parts lines, complete with the 409 check, a signal store, ProblemDetails.
+2. **Deploy the skeleton early**, before the features, so every later schema change and new Azure resource ships the way it would at work:
+   - **Infra as code:** Bicep with Azure Verified Modules, `dev` and `prod` parameter files.
+   - **Pull request workflow:** build, test, `bicep lint`, and `what-if` against dev and prod. The what-if output goes into the run's summary and a PR comment, so a reviewer sees exactly which Azure resources would be created, changed or deleted before merging.
+   - **Main workflow:** build the container image and the EF migration bundle once → dev (infra, migrations, app) → **pauses for approval** on the GitHub `prod` environment (required reviewer), with prod's what-if in the summary → prod (infra, migrations, app).
+   - **No clickops and no stored secrets:** the pipeline signs in to Azure with OIDC (federated credentials). People get Reader on prod; only the pipeline changes it.
+   - **Two database identities:** the pipeline's identity runs migrations (schema rights). The app's managed identity can only read and write data.
 3. **BFF auth:** Entra ID sign-in, cookie, anti-forgery, Mechanic and Supervisor app roles.
    Then, to learn **scopes**: show the signed-in user's profile from Microsoft Graph (the server gets a token for `User.Read` on the user's behalf).
-4. **Tests:** API integration tests (xUnit + Aspire testing), Angular component tests.
-5. **Infra:** Bicep + AVM, `what-if`, deploy a dev environment.
-6. **CI/CD:** build, test, deploy to dev, approve, deploy to prod.
-7. *Maybe:* split the API into its own service behind the BFF with YARP, to learn token forwarding.
+4. **The repair-order features, one migration each:** new order page, details page, claim (409 check), parts dialog with autocomplete, labor lines, close, reassign and cancel, a signal store, ProblemDetails.
+5. **Tests:** API integration tests (xUnit + Aspire testing), Angular component tests, added to the pipeline.
+6. *Maybe:* split the API into its own service behind the BFF with YARP, to learn token forwarding.
 
 ## Local setup
 What I have: .NET SDK 10.0.400, Aspire CLI 13.6, Azure CLI 2.90, azd 1.35, Docker Desktop.
@@ -346,12 +440,7 @@ I wire things up one piece at a time and run after each one: the server (4a), th
 #### 4a. The server under Aspire
 The pattern comes from [`aspire-with-javascript`](https://github.com/microsoft/aspire-samples/tree/main/samples/aspire-with-javascript) in `microsoft/aspire-samples`: the AppHost registers the API with `AddProject`, and the API calls `AddServiceDefaults()`.
 
-[`AppHost.cs`](src/RepairOrders.AppHost/AppHost.cs) registers the server:
-```csharp
-var server = builder.AddProject<Projects.RepairOrders_Server>("server")
-    .WithExternalHttpEndpoints()
-    .WithHttpHealthCheck("/health");
-```
+[`AppHost.cs`](src/RepairOrders.AppHost/AppHost.cs) registers the server with `AddProject`:
 - `Projects.RepairOrders_Server` is a type the Aspire SDK generates from the AppHost's `<ProjectReference>`. The `.` in the name becomes `_`.
 - `WithExternalHttpEndpoints()` **changes nothing locally**; on my machine every endpoint is reachable on `localhost` anyway. It matters at deploy time. Aspire marks the endpoint as external, so in Azure Container Apps the server gets [external ingress](https://learn.microsoft.com/azure/container-apps/ingress-overview#external-and-internal-ingress): a public URL. Without it, the app gets internal ingress, reachable only by other apps in the same Container Apps environment. The server is the only thing a browser talks to, so it's the only resource that gets this. SQL Server and, later, a separate API stay internal.
 - `WithHttpHealthCheck("/health")` makes Aspire poll the server's `/health` endpoint. The dashboard shows real health instead of just "process started", and later `WaitFor(server)` waits until the server is actually ready.
@@ -376,12 +465,7 @@ aspire add javascript      # adds Aspire.Hosting.JavaScript 13.6.4 to the AppHos
 ```
 `Aspire.Hosting.JavaScript` is a **hosting integration**: a NuGet package that teaches the AppHost a new kind of resource. The core AppHost only knows .NET projects, containers and plain executables. This package adds `AddJavaScriptApp`, which knows how to run `npm install` and `npm run <script>`. Only the AppHost uses it; it doesn't ship with the app.
 
-In [`AppHost.cs`](src/RepairOrders.AppHost/AppHost.cs):
-```csharp
-var ui = builder.AddJavaScriptApp("ui", "../ui", runScriptName: "start")
-    .WithNpm()
-    .WithHttpEndpoint(targetPort: 4200);
-```
+In [`AppHost.cs`](src/RepairOrders.AppHost/AppHost.cs), `ui` is an `AddJavaScriptApp("ui", "../ui", runScriptName: "start")`:
 - `runScriptName: "start"` → `npm run start` → `"start": "ng serve"` in `src/ui/package.json`.
 - `WithNpm()` runs `npm install` in `src/ui` before each start, as its own resource (`ui-installer` in the dashboard). It installs the app's packages into `node_modules`, not npm itself (mise provides Node and npm). It's quick when nothing changed, and a fresh clone runs without extra setup.
 - `WithHttpEndpoint(targetPort: 4200)` tells Aspire the app listens on 4200, `ng serve`'s default. That gives `ui` a URL in the dashboard and a name (`ui`) the server can look up. Aspire puts its own proxy in front, so the URL shows a different port, which forwards to 4200.
@@ -416,9 +500,9 @@ sequenceDiagram
     participant B as Browser
     participant S as RepairOrders.Server :7282
     participant NG as ng serve :4200 (dev only)
-    B->>S: GET /orders
+    B->>S: GET /repair-orders
     Note over S: no endpoint matches, so the catch-all forwards it
-    S->>NG: GET /orders
+    S->>NG: GET /repair-orders
     NG-->>B: index.html (ng serve returns it for any app route)
     B->>S: GET /main.js, /styles.css, live-reload WebSocket
     S->>NG: forwarded by YARP
@@ -426,8 +510,110 @@ sequenceDiagram
     B->>S: GET /health
     S-->>B: Healthy (the server's own endpoint)
 ```
-`/orders` is an **Angular** route (a page), not an API call. `ng serve` returns `index.html` for every path that isn't a file, and Angular's router reads the URL in the browser and shows the right page. API calls use their own prefix, `/api/orders`, so the two never collide.
+`/repair-orders` is an **Angular** route (a page), not an API call. `ng serve` returns `index.html` for every path that isn't a file, and Angular's router reads the URL in the browser and shows the right page. API calls use their own prefix, `/api/repair-orders`, so the two never collide.
 
 What I got: the Angular page on the server's URL, `/health` answered by the server, and editing `app.html` live-reloads the page on `:7282`, so the live-reload WebSocket goes through YARP too.
 
-**A trap to fix next:** `curl https://localhost:7282/api/orders` returns `index.html` with `200`, because there's no API yet and the catch-all forwards it. A typo in an API path would look like success to the Angular `HttpClient`. In 4d I map `/api/*` so unknown API paths return `404`.
+**A trap to fix next:** `curl https://localhost:7282/api/repair-orders` returns `index.html` with `200`, because there's no API yet and the catch-all forwards it. A typo in an API path would look like success to the Angular `HttpClient`. In 4d I map `/api/*` so unknown API paths return `404`.
+
+#### 4d. SQL Server, EF Core and the first API
+Four small steps, running the app after each: the database container (4d-1), the EF Core model (4d-2), the first migration and seed data (4d-3), then `GET /api/repair-orders` and the `/api/*` 404 (4d-4). The AppHost wiring follows [`database-migrations`](https://github.com/microsoft/aspire-samples/tree/main/samples/database-migrations) in `microsoft/aspire-samples`.
+
+**4d-1. SQL Server in the AppHost**
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+aspire add sqlserver      # adds Aspire.Hosting.SqlServer 13.6.4 to the AppHost
+```
+Another hosting integration, like `javascript` in 4b. It adds `AddSqlServer` (a SQL Server **container**) and `AddDatabase`. In [`AppHost.cs`](src/RepairOrders.AppHost/AppHost.cs):
+- `AddSqlServer("sql")` with `WithLifetime(ContainerLifetime.Persistent)` and `WithDataVolume()`: the container keeps running between AppHost runs, and the data lives in a Docker volume.
+- `AddDatabase("repairorders", databaseName: "repairorders")`: the first argument is the **resource name**, which is also the **connection string name** (`ConnectionStrings:repairorders`). `databaseName` is the real database inside SQL Server. It defaults to the resource name; I wrote it out so the two jobs are visible.
+- The server gets `.WithReference(db).WaitFor(db)`: the connection string, and no start until the database exists.
+- Aspire generates the `sa` password and saves it in the AppHost's user secrets (`Parameters:sql-password`), along with the host port (`Resources:sql:tcp:port`). Both stay the same across runs, which a persistent container needs. Nothing secret is in the repo.
+
+What I got: the first run pulled the image (~1.5 GB). The image is amd64-only, and it runs fine under Rosetta on my Apple Silicon Mac. `sql` and `repairorders` reached **Running**, then `server` started. The one "Login failed ... Failed to open the explicitly specified database 'repairorders'" line in the `sql` log is expected: Aspire checked for the database, didn't find it, and then logged "Creating database 'repairorders'".
+
+**Looking inside the database.** The app doesn't need this, but it's handy for checking migrations and data. I use the [SQL Server (mssql) extension for VS Code](https://learn.microsoft.com/sql/tools/visual-studio-code-extensions/mssql/mssql-extension-visual-studio-code):
+1. Install it from the Extensions view (search "SQL Server (mssql)", publisher Microsoft).
+2. Get the port and password from the AppHost's user secrets (`Resources:sql:tcp:port` and `Parameters:sql-password`). The easiest way: in the Solution Explorer (C# Dev Kit), right-click `RepairOrders.AppHost` → **Manage User Secrets**, which opens its `secrets.json`:
+   ```json
+   {
+     "Resources:sql:tcp:port": "20657",
+     "Parameters:sql-password": "<generated>",
+     ...
+   }
+   ```
+   Or from a terminal:
+   ```bash
+   cd ~/RiderProjects/bff-aspnetcore-angular
+   dotnet user-secrets list --project src/RepairOrders.AppHost
+   ```
+3. In the SQL Server view → **Add Connection**, with Input type **Parameters**:
+
+   | Field | Value | Why |
+   |---|---|---|
+   | Profile Name | `repairorders (Aspire)` | Any label |
+   | Server name / Port | `localhost` / the `Resources:sql:tcp:port` value | Docker maps that host port to 1433 in the container |
+   | Trust server certificate | ✅ | The container's certificate is self-signed |
+   | Authentication type | SQL Login | The container has no Entra ID; `sa` is SQL Server's built-in admin |
+   | User name / Password | `sa` / the `Parameters:sql-password` value | Generated by Aspire |
+   | Database name | `repairorders` | Appears in the list once the login works |
+   | Encrypt | Mandatory (default) | Works because the certificate is trusted |
+
+   Then **Test connection** → **Connect**. If you skip the trust box, you get "error occurred during the pre-login handshake ... error: 35": the TLS handshake failed because the extension doesn't trust the self-signed certificate. Click **Enable 'Trust Server Certificate'** and it connects. This is a local `sa` login; in Azure the app uses Entra-only auth to Azure SQL, with no passwords.
+
+**4d-2. The EF Core model**
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+dotnet add src/RepairOrders.Server package Aspire.Microsoft.EntityFrameworkCore.SqlServer --version 13.6.4
+dotnet add src/RepairOrders.Server package System.Security.Cryptography.Pkcs --version 10.0.14
+```
+`Aspire.Microsoft.EntityFrameworkCore.SqlServer` is the **client integration**, the app-side partner of `Aspire.Hosting.SqlServer`. It brings EF Core's SQL Server provider, and one call, `AddSqlServerDbContext`, does what I'd otherwise wire up by hand with the plain provider package:
+- reads the connection string `ConnectionStrings:repairorders` (from the AppHost's `WithReference`)
+- registers the `DbContext` with pooling
+- retries brief SQL errors (`EnableRetryOnFailure`)
+- adds a database check to `/health`
+- sends EF Core's traces and metrics to the dashboard through OpenTelemetry
+
+The retries are EF Core's own SQL retry strategy, not the HttpClient resilience from ServiceDefaults (that one only covers outgoing HTTP calls). With the plain `Microsoft.EntityFrameworkCore.SqlServer` package I'd wire up each of these myself.
+
+The second package is a **security pin for a transitive dependency**. A *transitive* dependency is a package I never asked for: one of my packages depends on it. Here `Aspire.Microsoft.EntityFrameworkCore.SqlServer` asks for `System.Security.Cryptography.Pkcs` 10.0.12 (and `Microsoft.Data.SqlClient` 7.0.2 underneath it asks for an older one, which NuGet raises to 10.0.12). The build warned (NU1902/NU1903) that 10.0.12 has a high-severity denial-of-service bug, fixed in 10.0.13. I can't edit those packages' dependencies, but NuGet lets a **direct** reference win: if my project references a package itself, that version is used instead of the one a dependency asks for (["direct dependency wins"](https://learn.microsoft.com/nuget/concepts/dependency-resolution#direct-dependency-wins)). A NuGet dependency version is a minimum ("10.0.12 or later"), so 10.0.14 satisfies everyone.
+- `dotnet nuget why src/RepairOrders.Server System.Security.Cryptography.Pkcs` shows the chain.
+- The pin has a comment in the `.csproj`. Once Aspire ships a SqlClient that brings a fixed version, I remove it.
+- Interview version: "NuGet audit flagged a transitive package; I traced it with `nuget why`, pinned the patched version as a direct reference, and noted when to remove the pin."
+
+What I wrote, in [`Data/`](src/RepairOrders.Server/Data/):
+- [`RepairOrder`](src/RepairOrders.Server/Data/RepairOrder.cs): the entity (unit number, complaint, status, created date, row version) and the `RepairOrderStatus` enum. Only what the order list needs; the rest of [the data model](#how-the-app-works) arrives with its feature.
+- [`RepairOrdersDbContext`](src/RepairOrders.Server/Data/RepairOrdersDbContext.cs): the `RepairOrders` set, plus the column rules EF can't guess:
+  - **Max lengths** on strings, so they aren't `nvarchar(max)`, which can't be indexed.
+  - **Status stored as text** (`"InProgress"`), not as the enum's number. The table reads clearly, and if someone reorders the enum later, old rows still mean the same thing. With numbers, `1` could silently turn from InProgress into something else.
+  - **`RowVersion` as a SQL Server `rowversion`:** the database bumps it on every update, and EF puts it in the `UPDATE`'s `WHERE`. If someone else saved first, zero rows match and EF throws, which becomes a **409**. Optimistic concurrency without locks, enforced by the database. Example below.
+
+**How rowversion handles two mechanics claiming order 42 at once** (the claim endpoint comes in roadmap 4):
+```mermaid
+sequenceDiagram
+    participant A as Mechanic A
+    participant B as Mechanic B
+    participant API as Server (EF Core)
+    participant DB as SQL Server
+    A->>API: GET order 42
+    B->>API: GET order 42
+    API-->>A: unassigned, rowVersion 0x7D1
+    API-->>B: unassigned, rowVersion 0x7D1
+    Note over A,B: Reads don't lock. Both see the same version.
+    A->>API: claim 42 (sends 0x7D1)
+    API->>DB: UPDATE … SET AssignedMechanicId = A WHERE Id = 42 AND RowVersion = 0x7D1
+    DB-->>API: 1 row (RowVersion is now 0x7D2)
+    API-->>A: 200, claimed
+    B->>API: claim 42 (sends 0x7D1)
+    API->>DB: UPDATE … SET AssignedMechanicId = B WHERE Id = 42 AND RowVersion = 0x7D1
+    DB-->>API: 0 rows: the version moved on
+    Note over API: EF throws DbUpdateConcurrencyException
+    API-->>B: 409 Conflict (ProblemDetails)
+    Note over B: The UI says "someone else claimed this" and reloads
+```
+Nobody is blocked from reading, and nothing is locked while a mechanic is looking at the screen. Only the second **write** loses, and it's told so instead of silently overwriting A's claim ("last write wins"). The alternative, pessimistic locking, would hold a database lock for as long as someone has the page open, which doesn't work for a web app.
+- [`Program.cs`](src/RepairOrders.Server/Program.cs) registers it with `AddSqlServerDbContext<RepairOrdersDbContext>("repairorders")`.
+
+Entities never leave the server. The API returns DTOs (4d-4), so the database shape and the API contract can change separately.
+
+What I got: a clean build, and `server` still **Healthy**, now with the database check behind `/health`. No tables yet; the first migration creates them.
