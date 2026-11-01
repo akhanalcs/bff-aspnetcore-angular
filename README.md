@@ -303,6 +303,8 @@ mise use -g node@24     # writes ~/.config/mise/config.toml
 ```
 mise then warns that `node is defined in .../mise.toml which overrides the global config`. That's expected: inside this repo the repo's pin wins, and everywhere else the global one applies.
 
+Later (4d-3) mise also pins the EF Core command-line tool, so `mise.toml` is the one place for dev tool versions. The .NET SDK itself I installed from [Microsoft's installer](https://dotnet.microsoft.com/download) before this repo existed, and I kept it that way: mise can install SDKs too, but Rider, C# Dev Kit and Aspire all find the SDK in its standard location (`/usr/local/share/dotnet`) with no setup. The .NET way to pin an SDK version for a repo is a `global.json`, which works however the SDK was installed.
+
 ### Start Docker
 Aspire runs SQL Server in a container, so Docker has to be running.
 ```bash
@@ -559,7 +561,10 @@ What I got: the first run pulled the image (~1.5 GB). The image is amd64-only, a
    | Database name | `repairorders` | Appears in the list once the login works |
    | Encrypt | Mandatory (default) | Works because the certificate is trusted |
 
-   Then **Test connection** → **Connect**. If you skip the trust box, you get "error occurred during the pre-login handshake ... error: 35": the TLS handshake failed because the extension doesn't trust the self-signed certificate. Click **Enable 'Trust Server Certificate'** and it connects. This is a local `sa` login; in Azure the app uses Entra-only auth to Azure SQL, with no passwords.
+   Then **Test connection** → **Connect**. If you skip the trust box, you get "error occurred during the pre-login handshake ... error: 35": the TLS handshake failed because the extension doesn't trust the self-signed certificate. Click **Enable 'Trust Server Certificate'** and it connects.
+4. **Querying:** in the **SQL Server** view, expand the connection → `repairorders` → Tables, right-click `dbo.RepairOrders` → **Select Top 1000** (it writes and runs the query), or right-click the database → **New Query** to write my own and press **Run** in the editor's toolbar.
+
+The extension also adds a **Database Projects** view. That's not for browsing data: it's for SQL database projects (`.sqlproj`), where the schema is kept as `CREATE TABLE` scripts and deployed as a DACPAC. It's the other way to own a schema in the Microsoft world (common with DBA teams). I use EF Core migrations instead, so I don't need it. This is a local `sa` login; in Azure the app uses Entra-only auth to Azure SQL, with no passwords.
 
 **4d-2. The EF Core model**
 ```bash
@@ -577,7 +582,22 @@ dotnet add src/RepairOrders.Server package System.Security.Cryptography.Pkcs --v
 The retries are EF Core's own SQL retry strategy, not the HttpClient resilience from ServiceDefaults (that one only covers outgoing HTTP calls). With the plain `Microsoft.EntityFrameworkCore.SqlServer` package I'd wire up each of these myself.
 
 The second package is a **security pin for a transitive dependency**. A *transitive* dependency is a package I never asked for: one of my packages depends on it. Here `Aspire.Microsoft.EntityFrameworkCore.SqlServer` asks for `System.Security.Cryptography.Pkcs` 10.0.12 (and `Microsoft.Data.SqlClient` 7.0.2 underneath it asks for an older one, which NuGet raises to 10.0.12). The build warned (NU1902/NU1903) that 10.0.12 has a high-severity denial-of-service bug, fixed in 10.0.13. I can't edit those packages' dependencies, but NuGet lets a **direct** reference win: if my project references a package itself, that version is used instead of the one a dependency asks for (["direct dependency wins"](https://learn.microsoft.com/nuget/concepts/dependency-resolution#direct-dependency-wins)). A NuGet dependency version is a minimum ("10.0.12 or later"), so 10.0.14 satisfies everyone.
-- `dotnet nuget why src/RepairOrders.Server System.Security.Cryptography.Pkcs` shows the chain.
+- **Finding the chain:** `dotnet nuget why` answers "why is *this* package in my project?", so I pass the suspicious package (the bottom of the chain), not the one I added:
+  ```bash
+  cd ~/RiderProjects/bff-aspnetcore-angular
+  dotnet nuget why src/RepairOrders.Server System.Security.Cryptography.Pkcs
+  ```
+  ```
+  ├── Aspire.Microsoft.EntityFrameworkCore.SqlServer (v13.6.4)
+  │   ├── Microsoft.Data.SqlClient (v7.0.2)
+  │   │   └── System.Security.Cryptography.Pkcs (v10.0.14)
+  │   ├── Microsoft.EntityFrameworkCore.SqlServer (v10.0.12)
+  │   │   └── Microsoft.Data.SqlClient (v7.0.2)
+  │   │       └── System.Security.Cryptography.Pkcs (v10.0.14)
+  │   └── System.Security.Cryptography.Pkcs (v10.0.14)
+  └── System.Security.Cryptography.Pkcs (v10.0.14)      ← my pin
+  ```
+  Pkcs arrives by three paths, and after the pin every one of them shows 10.0.14 (before, they showed 10.0.12). That's how I know the pin took effect.
 - The pin has a comment in the `.csproj`. Once Aspire ships a SqlClient that brings a fixed version, I remove it.
 - Interview version: "NuGet audit flagged a transitive package; I traced it with `nuget why`, pinned the patched version as a direct reference, and noted when to remove the pin."
 
@@ -617,3 +637,52 @@ Nobody is blocked from reading, and nothing is locked while a mechanic is lookin
 Entities never leave the server. The API returns DTOs (4d-4), so the database shape and the API contract can change separately.
 
 What I got: a clean build, and `server` still **Healthy**, now with the database check behind `/health`. No tables yet; the first migration creates them.
+
+**4d-3. Migrations, the tool and the first table**
+
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+mise use dotnet:dotnet-ef@10.0.12      # the dotnet ef CLI, pinned in mise.toml
+dotnet add src/RepairOrders.Server package Microsoft.EntityFrameworkCore.Design --version 10.0.12
+```
+- **`dotnet-ef` through mise:** mise's [`dotnet:` backend](https://mise.jdx.dev/lang/dotnet.html) runs `dotnet tool install` for me and pins the version next to Node, so `mise install` sets up a fresh machine (or CI) in one step. The usual .NET alternative is a tool manifest (`.config/dotnet-tools.json` + `dotnet tool restore`); it works, but it would be a second file pinning tools.
+- **10.0.12 everywhere:** that's the EF Core version Aspire's package brings, so the tool, the Design package and the runtime match. When Aspire moves EF Core forward, I bump all three together.
+- **`Microsoft.EntityFrameworkCore.Design`** is what `dotnet ef` loads into my project to read the model and write migration code. It only **creates** migrations; **applying** them (`Database.Migrate()`, and the bundle) comes from `Microsoft.EntityFrameworkCore.Relational`, which the SQL Server provider already brings. `dotnet add` marks it `PrivateAssets="all"` because the package says it's a development dependency; the [`.csproj`](src/RepairOrders.Server/RepairOrders.Server.csproj) comment explains what that does and doesn't mean.
+
+**A connection string for the tools.** `dotnet ef` builds my app by running `Program.cs`, without the AppHost, so Aspire's connection string isn't there and EF fails with "No database provider has been configured" ([Aspire's docs](https://aspire.dev/integrations/databases/efcore/migrations/) call this out). The tools [run the app as `Development`](https://learn.microsoft.com/ef/core/managing-schemas/migrations/applying#environment-and-configuration) when no environment is set, and Development loads **user secrets**, so I put the local connection string in the server's user secrets:
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+dotnet user-secrets init --project src/RepairOrders.Server     # adds a UserSecretsId to the .csproj
+```
+Then **Manage User Secrets** on `RepairOrders.Server` (or `dotnet user-secrets set`) with `ConnectionStrings:repairorders` = `Server=localhost,<port>;Database=repairorders;User ID=sa;Password='<sql-password>';TrustServerCertificate=true`, using the port and password from the AppHost's secrets. The quotes around the password keep a `;` in it from ending the value. At runtime this is never used: Aspire passes the server its connection string as an environment variable, and environment variables win over user secrets.
+
+**The first migration:**
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+dotnet ef migrations add InitialCreate --project src/RepairOrders.Server --output-dir Data/Migrations
+dotnet ef database update --project src/RepairOrders.Server
+```
+- `migrations add` compares the model with the last migration's snapshot and writes C# into [`Data/Migrations/`](src/RepairOrders.Server/Data/Migrations/): the migration (`Up` creates the table, `Down` drops it) and `RepairOrdersDbContextModelSnapshot.cs`, EF's record of what the model looks like now. It doesn't touch the database.
+- **I read every generated migration before applying it.** EF's docs insist on this, because a rename can come out as drop-and-add, which loses data. This one has `nvarchar(20)`, `nvarchar(500)`, `Status` as `nvarchar(20)` and `RowVersion` as `rowversion`, as configured.
+- `database update` applies whatever isn't applied yet and records it in `__EFMigrationsHistory`. That table is how EF (and later the bundle) knows what's done, so running it twice does nothing the second time.
+
+What I got: `RepairOrders` and `__EFMigrationsHistory` (one row, `..._InitialCreate`) in the SQL Server view.
+
+**Can I delete a migration?** It depends on whether anyone else has it:
+
+| Situation | What to do |
+|---|---|
+| Only on my machine, not applied | `dotnet ef migrations remove`: deletes the last migration **and** rolls the snapshot back. Never delete the files by hand; the snapshot would still describe the deleted change, and the next migration comes out wrong. |
+| Applied to my local database, not pushed | `dotnet ef database update <PreviousMigration>` first (runs its `Down`), then `migrations remove`. Or drop the local database. |
+| Pushed, merged, or deployed anywhere | **Don't.** Other databases have it in their history. Fix forward with a new migration that changes it back. |
+| Hundreds of old migrations, slow builds | Some teams **squash**: replace them all with one new baseline migration and mark it applied in existing databases. Rare, planned, and done by the whole team at once. |
+
+That's what people mean by "deleting migrations deep into development": it's either an unshared local mistake, or a planned squash. Deleting a deployed migration on its own breaks every other database.
+
+**Catching a forgotten migration in CI.** If someone changes an entity but forgets `migrations add`, the code builds but the database doesn't match. EF Core 9+ has a command for exactly this; the pipeline (roadmap 2) runs it and fails the build:
+```bash
+dotnet ef migrations has-pending-model-changes --project src/RepairOrders.Server
+```
+EF Core 9+ also refuses to `Migrate()` when the model has changes no migration covers, so the mistake can't slip silently into production either.
+
+**How this runs in production** (roadmap 2): not `dotnet ef database update`, and not the app at startup. The pipeline packs the same migrations into a [bundle](https://learn.microsoft.com/ef/core/managing-schemas/migrations/applying#bundles) and runs it as its own step, with an identity that has schema rights. The app's own login can only read and write data.

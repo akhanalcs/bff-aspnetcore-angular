@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Web">
+﻿<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <ItemGroup>
     <ProjectReference Include="..\RepairOrders.ServiceDefaults\RepairOrders.ServiceDefaults.csproj" />
@@ -6,6 +6,14 @@
 
   <ItemGroup>
     <PackageReference Include="Aspire.Microsoft.EntityFrameworkCore.SqlServer" Version="13.6.4" />
+    <!-- Only for `dotnet ef` (creating migrations); app code never uses it.
+      PrivateAssets=all: projects that reference this one don't inherit it.
+      IncludeAssets leaves out "compile", so app code can't call its APIs by accident;
+      "runtime" stays because dotnet ef loads the DLL from bin/. -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="10.0.12">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
     <PackageReference Include="Microsoft.Extensions.ServiceDiscovery.Yarp" Version="10.10.0" />
     <!-- Security pin. Aspire's EF package (via Microsoft.Data.SqlClient) brings in Pkcs 10.0.12, which has
       a known DoS vulnerability (NU1903). A direct reference wins over a transitive one, so this patched
@@ -18,6 +26,7 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <UserSecretsId>640c6449-cb61-4094-96ad-876a80fab468</UserSecretsId>
   </PropertyGroup>
 
 </Project>
