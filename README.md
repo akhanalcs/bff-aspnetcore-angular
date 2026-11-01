@@ -686,3 +686,22 @@ dotnet ef migrations has-pending-model-changes --project src/RepairOrders.Server
 EF Core 9+ also refuses to `Migrate()` when the model has changes no migration covers, so the mistake can't slip silently into production either.
 
 **How this runs in production** (roadmap 2): not `dotnet ef database update`, and not the app at startup. The pipeline packs the same migrations into a [bundle](https://learn.microsoft.com/ef/core/managing-schemas/migrations/applying#bundles) and runs it as its own step, with an identity that has schema rights. The app's own login can only read and write data.
+
+**4d-3b. Demo data, in Development only**
+
+A fresh database should show a few orders. EF Core 9+ has a hook for this: [`UseSeeding` and `UseAsyncSeeding`](https://learn.microsoft.com/ef/core/modeling/data-seeding#use-seeding-method). EF calls it **after it applies migrations**, every time, even when there was nothing to apply. So seeding is just code, and it runs with the same command:
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular
+dotnet ef database update --project src/RepairOrders.Server
+```
+- [`DevSeedData`](src/RepairOrders.Server/Data/DevSeedData.cs) adds one order in each status, only when the table is empty, so running it again changes nothing. It has a sync version (`dotnet ef database update` calls that one) and an async one (`MigrateAsync` calls that), because EF asks for both.
+- [`Program.cs`](src/RepairOrders.Server/Program.cs) registers it through `AddSqlServerDbContext`'s `configureDbContextOptions` hook, **inside `if (builder.Environment.IsDevelopment())`**. `dotnet ef` runs the app as Development, so my local database gets the demo orders. The production bundle runs as Production, so production never does.
+
+What I got: "No migrations were applied. The database is already up to date.", and then the seeding ran anyway: one `EXISTS` check, then a single `MERGE` inserting all 5 rows in one round trip, with `OUTPUT INSERTED.[Id], INSERTED.[RowVersion]` so EF learns the values SQL Server generated. The log also shows `sp_getapplock` on `__EFMigrationsLock`: EF 9+ takes a database-wide lock while migrating and seeding, so two runs at once can't both apply the same migration.
+
+**Two kinds of seed data:**
+
+| | Where | Reaches production? |
+|---|---|---|
+| **Reference data** every environment needs (the parts catalog, in roadmap 4) | `HasData` in the model. It becomes part of a migration, so it's reviewed like schema | Yes, through the bundle |
+| **Demo or test data** | `UseSeeding` code, gated by environment | No |

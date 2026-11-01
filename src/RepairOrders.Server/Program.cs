@@ -10,7 +10,16 @@ builder.AddServiceDefaults();
 
 // EF Core for the "repairorders" database: reads ConnectionStrings:repairorders (from the AppHost's
 // WithReference), pools DbContexts, retries brief SQL errors, and adds a health check and tracing.
-builder.AddSqlServerDbContext<RepairOrdersDbContext>("repairorders");
+builder.AddSqlServerDbContext<RepairOrdersDbContext>("repairorders",
+    configureDbContextOptions: options =>
+    {
+        // Demo data in Development only. EF runs it after applying migrations; production never gets it.
+        if (builder.Environment.IsDevelopment())
+        {
+            options.UseSeeding((context, _) => DevSeedData.Seed(context));
+            options.UseAsyncSeeding((context, _, cancellationToken) => DevSeedData.SeedAsync(context, cancellationToken));
+        }
+    });
 
 // YARP's forwarder, resolving names like `http://ui` through Aspire service discovery.
 builder.Services.AddHttpForwarderWithServiceDiscovery();
