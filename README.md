@@ -161,7 +161,7 @@ In damienbod's code, the `_Host` Razor page renders `index.html` in both modes, 
 | **The BFF and the API are the same app.** YARP only proxies the Angular dev server, in dev | This is how damienbod's sample works. Same origin, no extra hop, one thing to secure | A separate API behind the BFF, with YARP forwarding calls and attaching an access token. Worth it when several APIs or teams are involved |
 | **App roles + authorization policies** for Mechanic and Supervisor | Roles are assigned in Entra ID and arrive in the `roles` claim; policies check them on each endpoint | API **scopes**: I don't need them, because the browser never calls an API with a token. Scopes come in when the server calls a downstream API (like Microsoft Graph) on the user's behalf |
 | **Angular CLI** | Standard tooling. Nothing here needs a monorepo tool | Nx |
-| **Angular Material + CDK** | Free, made by the Angular team, accessible, has dialogs and tables | PrimeNG, or a paid suite (Syncfusion, Kendo, DevExtreme) for heavy data grids |
+| **Angular Material + CDK**, with the order list as a Material table whose paging, sorting and filters (status, date range) run **on the server** | Free, made by the Angular team, accessible, has dialogs, tables and a date-range picker. Filtering belongs on the server anyway: a grid's built-in filters only see the rows it has loaded | **AG Grid Community** (free): worth it for spreadsheet-like features (column filters, grouping, pinning) that this app doesn't need. **Syncfusion / Kendo / DevExtreme**: paid suites (Syncfusion's community license is free for individuals), a large dependency and their own way of doing everything |
 | **Plain CSS** with a Material prebuilt theme | Modern CSS has nesting and variables. Components style themselves with Material's `--mat-sys-*` CSS variables, so no Sass build step | SCSS: only needed for a custom Material theme (`mat.theme` mixin), which I can add later as a single file. Tailwind: a second styling system next to Material |
 | **TypeScript types generated from the API's OpenAPI document** ([`openapi-typescript`](https://openapi-ts.dev/)), called from my own small `HttpClient` services | The C# DTOs stay the source of truth, and a renamed field breaks the Angular build instead of failing at runtime. Calls still go through Angular's `HttpClient`, so interceptors (anti-forgery header, 401 → sign in) and `httpResource` work | **Kiota**: Microsoft's generator, but its TypeScript client sends requests with `fetch`, not `HttpClient`, so Angular interceptors don't see them. **NSwag**: generates whole Angular services, but it's tied to its own OpenAPI pipeline, and a big generated service is harder to read than a small hand-written one |
 | **Signals for state, RxJS for streams;** a feature store provided on the route | The modern Angular default, and easy to read | NgRx: worth it when many features share complex state |
@@ -253,7 +253,7 @@ I follow Angular's own [style guide](https://angular.dev/style-guide) and its [b
 - **Accessibility:** WCAG AA and AXE checks pass.
 
 ## Roadmap
-1. **Local skeleton:** Aspire AppHost, the server, SQL Server, and the Angular app behind YARP. List repair orders. No auth yet.
+1. **Local skeleton:** Aspire AppHost, the server, SQL Server, and the Angular app behind YARP. `GET /api/repair-orders` and a simple order list page with Angular Material. No auth yet.
 2. **Deploy the skeleton early**, before the features, so every later schema change and new Azure resource ships the way it would at work:
    - **Infra as code:** Bicep with Azure Verified Modules, `dev` and `prod` parameter files.
    - **Pull request workflow:** build, test, `bicep lint`, and `what-if` against dev and prod. The what-if output goes into the run's summary and a PR comment, so a reviewer sees exactly which Azure resources would be created, changed or deleted before merging.
@@ -262,7 +262,7 @@ I follow Angular's own [style guide](https://angular.dev/style-guide) and its [b
    - **Two database identities:** the pipeline's identity runs migrations (schema rights). The app's managed identity can only read and write data.
 3. **BFF auth:** Entra ID sign-in, cookie, anti-forgery, Mechanic and Supervisor app roles.
    Then, to learn **scopes**: show the signed-in user's profile from Microsoft Graph (the server gets a token for `User.Read` on the user's behalf).
-4. **The repair-order features, one migration each:** new order page, details page, claim (409 check), parts dialog with autocomplete, labor lines, close, reassign and cancel, a signal store, ProblemDetails.
+4. **The repair-order features, one migration each:** a home page with today's orders by status (a `GROUP BY` summary endpoint, drawn with plain CSS bars, no chart library), list filters (status, date range) and paging on the server, new order page, details page, claim (409 check), parts dialog with autocomplete, labor lines, close, reassign and cancel, a signal store, ProblemDetails.
 5. **Tests:** API integration tests (xUnit + Aspire testing), Angular component tests, added to the pipeline.
 6. *Maybe:* split the API into its own service behind the BFF with YARP, to learn token forwarding.
 
@@ -437,7 +437,7 @@ The two under **Project** come from this repo's `.mcp.json`. The others come wit
 - The skills installer also offers a global `find-skills` skill; I don't need it.
 
 ### 4. Run it with Aspire
-I wire things up one piece at a time and run after each one: the server (4a), the Angular app (4b), YARP so both share one origin (4c), then SQL Server and the first API (4d).
+I wire things up one piece at a time and run after each one: the server (4a), the Angular app (4b), YARP so both share one origin (4c), SQL Server and the first API (4d), then the order list in Angular (4e).
 
 #### 4a. The server under Aspire
 The pattern comes from [`aspire-with-javascript`](https://github.com/microsoft/aspire-samples/tree/main/samples/aspire-with-javascript) in `microsoft/aspire-samples`: the AppHost registers the API with `AddProject`, and the API calls `AddServiceDefaults()`.
@@ -705,3 +705,19 @@ What I got: "No migrations were applied. The database is already up to date.", a
 |---|---|---|
 | **Reference data** every environment needs (the parts catalog, in roadmap 4) | `HasData` in the model. It becomes part of a migration, so it's reviewed like schema | Yes, through the bundle |
 | **Demo or test data** | `UseSeeding` code, gated by environment | No |
+
+**Why `DateTimeOffset.UtcNow`.** Every timestamp the server creates is in UTC. `DateTimeOffset.Now` wouldn't be *wrong*: on my laptop it gives `15:16+05:45` (Nepal), which is the same instant, and SQL Server compares `datetimeoffset` values by that instant. But the offset would only record where the server happened to run (my laptop, or UTC in Azure), so the data would have mixed offsets for no reason. UTC everywhere is the convention. The browser shows each time in the user's own time zone (Angular's `DatePipe` does that from the ISO string). Plain `DateTime.Now` is the one to avoid: it stores no offset at all, so nobody can tell later which time zone it meant.
+
+**4d-4. The first API endpoint, and real 404s under `/api`**
+
+- [`Api/RepairOrderEndpoints.cs`](src/RepairOrders.Server/Api/RepairOrderEndpoints.cs) maps `GET /api/repair-orders` in a route group. The query **projects** into a `RepairOrderListItem` DTO: SQL selects only those columns, EF doesn't track the results, and the entity never becomes the API contract. It's capped at 100 rows until the list gets real server-side paging. The handler returns `TypedResults.Ok<...>`, so OpenAPI can read the response type later, and takes a `CancellationToken`, so a closed browser tab cancels the SQL query.
+- [`Program.cs`](src/RepairOrders.Server/Program.cs):
+  - `ConfigureHttpJsonOptions` with `JsonStringEnumConverter`: the API sends `"InProgress"`, not `1`, the same as the database stores it.
+  - `app.MapGroup("/api")` for the API, then `api.Map("/{**path}", ...)` returning **404** for any other `/api` path. ASP.NET Core picks the most specific route, and `/api/{**path}` starts with a literal segment, so it beats the Angular forwarder's `/{**catch-all}`. It's mapped outside the Development check because production's "everything else → `index.html`" fallback needs the same protection.
+  - The file reads from most specific to least: health, the API, then "everything else goes to Angular". Routing doesn't depend on that order, but it's how routing decides, so it's the easiest way to read it.
+
+What I got:
+- `curl https://localhost:7282/api/repair-orders`: the 5 seeded orders as JSON, newest first, with `"status": "Open"` as text.
+- `/api/repair-ordrs` (a typo): **404**. The trap from 4c is fixed.
+- `/repair-orders`: **200**, still the Angular app.
+- In the dashboard's **Traces**, the `GET /api/repair-orders` trace has the SQL query nested under the HTTP request, with its timing and SQL text.

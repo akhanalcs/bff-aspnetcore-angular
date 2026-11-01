@@ -28,6 +28,8 @@ public static class DevSeedData
     // One order in each status, so the list and its status filter have something to show.
     private static RepairOrder[] DemoOrders()
     {
+        // UTC, like every timestamp the server creates. The browser shows it in the user's own time zone.
+        // (DateTimeOffset.Now would be the same instant with my laptop's +05:45, which means nothing to other users.)
         var now = DateTimeOffset.UtcNow;
         return
         [
