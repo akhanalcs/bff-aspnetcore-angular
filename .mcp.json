@@ -7,6 +7,10 @@
     "microsoft-learn": {
       "type": "http",
       "url": "https://learn.microsoft.com/api/mcp"
+    },
+    "bicep": {
+      "command": "dnx",
+      "args": ["-y", "Azure.Bicep.McpServer"]
     }
   }
 }

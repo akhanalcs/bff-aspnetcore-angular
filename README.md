@@ -168,9 +168,10 @@ In damienbod's code, the `_Host` Razor page renders `index.html` in both modes, 
 | **Signals for state, RxJS for streams;** a feature store provided on the route | The modern Angular default, and easy to read | NgRx: worth it when many features share complex state |
 | **EF Core migrations, applied by a separate deploy step** (a [migration bundle](https://learn.microsoft.com/ef/core/managing-schemas/migrations/applying#bundles) built in CI, run before the new app version), never by the app at startup in production | EF Core's [own guidance](https://learn.microsoft.com/ef/core/managing-schemas/migrations/applying): the app runs with a login that can only read and write data, a separate deploy identity changes the schema, and a failed migration stops the release before the new code goes out | Migrating at app startup: simple, but every replica needs schema rights and a bad migration takes the app down. A reviewed **SQL script** (`--idempotent`): the right pick when a DBA must approve the SQL. **DbUp**: hand-written SQL scripts, good when the database isn't owned by EF |
 | **Aspire** for local dev | One command starts the server, Angular and SQL, with a dashboard and traces | docker-compose plus scripts |
-| **Bicep with Azure Verified Modules**, in the azd folder layout | Infra is reviewed code, `what-if` previews changes, and Microsoft maintains the modules | Aspire-generated infra (a quick start, less control); Terraform |
+| **Bicep with Azure Verified Modules**, in an `infra/` folder with one `.bicepparam` file per environment | Infra is reviewed code, `what-if` previews changes, and Microsoft maintains the modules | Aspire-generated infra (a quick start, less control); Terraform |
+| **The az CLI in the pipeline** (`az deployment group what-if` / `create`, then `az acr` and `az containerapp`), each step a plain command in a GitHub Actions job | This is the shape of Microsoft's own [IaC with GitHub Actions architecture](https://learn.microsoft.com/devops/deliver/iac-github-actions) and what most enterprise Bicep pipelines look like (in GitHub or Azure DevOps). Each stage is its own job, in an order I can explain: what-if → approval → infra → migration bundle → app, with the *same* image promoted from dev to prod. The commands run the same way in my terminal, so a failed step is easy to reproduce. See [az CLI or azd?](#az-cli-or-azd-for-the-pipeline) | **azd**: a good, supported tool in CI too (it has `azd provision --preview` for what-if, and `azd publish` + `azd deploy --from-package` for build once, deploy many). But it's built for developers who own the whole app: one `azure.yaml`, its own environment state in a gitignored `.azure/` folder, and for an Aspire app it generates the Bicep from the AppHost unless I override it. Its `azd pipeline config` is still Beta. **`azure/bicep-deploy`**: Microsoft's newer GitHub Action around the same what-if/create, a fine swap later. **`aspire deploy`**: deploys straight from the AppHost. It's Aspire's own recommendation, but its CI/CD docs don't cover what-if or migrations yet |
 | **Azure Container Apps** | The same hosting as my order-processing app; one container | App Service: simpler for a single web app |
-| **GitHub Actions:** dev deploys automatically, prod needs approval; sign-in with OIDC | How teams ship, with no stored secrets | Deploying from my laptop with `azd up` (fine for dev only) |
+| **GitHub Actions:** dev deploys automatically, prod needs approval; sign-in with OIDC | How teams ship, with no stored secrets | Deploying from my laptop (`azd up` or `az deployment`): fine to try something in a throwaway resource group, but nobody can review it and it needs my rights on the subscription |
 
 ## Why BFF, and not MSAL in the browser
 ### The problem with tokens in the browser
@@ -243,6 +244,34 @@ Note: a script on *another* site can never read my cookies; the browser's same-o
 4. [Azure-Samples: ASP.NET Core web app with OpenID Connect](https://github.com/Azure-Samples/active-directory-aspnetcore-webapp-openidconnect-v2)
 5. [MDN: Set-Cookie](https://developer.mozilla.org/docs/Web/HTTP/Reference/Headers/Set-Cookie) and [ASP.NET Core anti-forgery](https://learn.microsoft.com/aspnet/core/security/anti-request-forgery)
 
+## az CLI or azd for the pipeline
+I wanted the industry-standard way, not just what's quickest, so I checked what Microsoft says before picking.
+
+**What "best practice" means here** comes from the [Well-Architected Framework](https://learn.microsoft.com/azure/well-architected/operational-excellence/safe-deployments), not from a tool:
+- All infra is code.
+- Every environment is deployed only by an automated pipeline.
+- Changes are small, and each one is previewed and reviewed before it ships.
+- The same build artifact is promoted from dev to prod.
+- The pipeline signs in with OIDC, with no stored secrets.
+
+All three tools can do this. The difference is how much each one hides.
+
+| | az CLI + Bicep | azd | `aspire deploy` |
+|---|---|---|---|
+| Who it's for ([Microsoft's comparison](https://learn.microsoft.com/azure/developer/azure-developer-cli/azure-developer-cli-vs-azure-cli)) | DevOps engineers, admins, any pipeline | Developers who own the whole app ("opinionated, high-level commands") | Aspire apps, driven by the AppHost |
+| Preview changes | `az deployment group what-if` | `azd provision --preview` | Not covered in the [CI/CD docs](https://aspire.dev/deployment/ci-cd/) |
+| Build once, deploy to dev then prod | Push an image tag, deploy that tag | [`azd publish` + `azd deploy --from-package`](https://learn.microsoft.com/azure/developer/azure-developer-cli/publishing-workflows) | `aspire publish`, then apply later |
+| CI setup | Write the workflow myself | `azd pipeline config` (Beta) creates the OIDC credential and a workflow | Write the workflow myself |
+| Where its state lives | Nothing local; Azure is the state | A gitignored `.azure/<env>/.env`, which has to be rebuilt on every runner | Aspire's deployment state cache |
+| Infra for this app | My Bicep with AVM | My Bicep, or Bicep generated from the AppHost | Generated from the AppHost |
+
+**My pick: the az CLI**, in GitHub Actions jobs I write myself:
+1. It's the shape of Microsoft's [IaC with GitHub Actions architecture](https://learn.microsoft.com/devops/deliver/iac-github-actions) (PR → what-if → merge → approved deploy) and of most enterprise Bicep pipelines. The same commands work in Azure DevOps.
+2. I can see and explain every stage, and I need a separate migration-bundle step between infra and app anyway. With azd that step would be a hook inside `azd provision` or `azd deploy`.
+3. It keeps my hand-written AVM Bicep as the only infra definition.
+
+azd isn't second-rate. For a small team that owns one app end to end, `azd up` plus `azd pipeline config` is Microsoft's fastest supported path, and it now has a preview and build once, deploy many. I'd pick it for a greenfield app where no platform team reviews infra changes. In an interview I'd say: *"azd and `aspire deploy` are great for getting an app running. For governed infra with what-if and approval gates I use the az CLI directly, because every step is explicit and the same pattern works on any CI system."*
+
 ## Angular conventions
 I follow Angular's own [style guide](https://angular.dev/style-guide) and its [best practices for AI-assisted code](https://angular.dev/ai/develop-with-ai). In short:
 - **Files:** hyphenated names (`order-list.ts`), one concept per file, tests next to the code (`order-list.spec.ts`), folders by feature, not by type (`components/`, `services/`). Feature folders sit straight under `src/app/` (`repair-orders/`, later `home/`), with no `features/` wrapper: the [style guide's example](https://angular.dev/style-guide#organize-your-project-by-feature-areas) does the same, and when every folder is a feature, the wrapper adds a level that says nothing. A folder gets subfolders only when it grows too big to scan.
@@ -307,6 +336,24 @@ mise then warns that `node is defined in .../mise.toml which overrides the globa
 
 Later (4d-3) mise also pins the EF Core command-line tool, so `mise.toml` is the one place for dev tool versions. The .NET SDK itself I installed from [Microsoft's installer](https://dotnet.microsoft.com/download) before this repo existed, and I kept it that way: mise can install SDKs too, but Rider, C# Dev Kit and Aspire all find the SDK in its standard location (`/usr/local/share/dotnet`) with no setup. The .NET way to pin an SDK version for a repo is a `global.json`, which works however the SDK was installed.
 
+### Azure CLI and Bicep
+I installed the Azure CLI with Homebrew (`brew install azure-cli`). Before upgrading Bicep I checked where my copy came from, because Bicep can be installed several ways (Homebrew, a standalone download, the az CLI):
+```bash
+cd ~
+which bicep                          # nothing: no standalone Bicep on PATH
+ls -la ~/.azure/bin                  # bicep: the copy the az CLI downloaded for itself
+az config get bicep                  # use_binary_from_path = false
+```
+So there's one Bicep CLI, the one `az` manages in `~/.azure/bin`, and `use_binary_from_path = false` tells `az` to use that copy even if another `bicep` shows up on PATH later. That makes `az bicep upgrade` the right way to update it. The VS Code Bicep extension brings its own language server for the editor, so it doesn't matter which CLI I have. In CI the az CLI fetches Bicep the same way.
+```bash
+cd ~
+az bicep upgrade && az bicep version
+```
+It went from 0.47.16 to 0.48.1, installed in the same `~/.azure/bin/bicep`.
+
+### Machine setup lives in each repo, kept short
+I first installed the Azure CLI and Bicep while preparing [rag-on-dotnet](https://github.com/akhanalcs/rag-on-dotnet#local-dev-setup). I thought about moving all machine setup (.NET, Azure, Bicep, Docker) into one repo and linking to it from the others, but I didn't: a reader of *this* repo should see what it needs without jumping to another one, and a shared page goes stale for the repos that don't match it anymore. So each README lists only what that repo needs, with the version and a link to the official install page. The detailed "why" stays here. If I want to rebuild a laptop in one go, the standard tool is a [Homebrew `Brewfile`](https://docs.brew.sh/Brew-Bundle-and-Brewfile) (`brew bundle dump` writes one) in a personal dotfiles repo. That's a later, optional TODO.
+
 ### Start Docker
 Aspire runs SQL Server in a container, so Docker has to be running.
 ```bash
@@ -322,6 +369,15 @@ git clone --depth 1 https://github.com/microsoft/aspire-samples
 ```
 - `damienbod-bff/server/Program.cs`: Microsoft.Identity.Web sign-in, anti-forgery (`X-XSRF-TOKEN`), security headers, and YARP to the Angular dev server
 - `aspire-samples/samples/aspire-with-javascript`: Angular in an AppHost with `AddJavaScriptApp(...).WithHttpEndpoint(env: "PORT")`
+
+**For the infra step (roadmap 2)** I looked for "gold" Bicep and pipeline code. The best sources are official, but none of them is a single sample:
+
+| Source | What I take from it | Why not more |
+|---|---|---|
+| Learn docs: [Deploy Bicep with GitHub Actions](https://learn.microsoft.com/azure/azure-resource-manager/bicep/deploy-github-actions), [OIDC from GitHub to Azure](https://learn.microsoft.com/azure/developer/github/connect-from-azure-openid-connect), [what-if](https://learn.microsoft.com/azure/azure-resource-manager/bicep/deploy-what-if), [deployment stacks](https://learn.microsoft.com/azure/azure-resource-manager/bicep/deployment-stacks); GitHub: [environments with required reviewers](https://docs.github.com/actions/deployment/targeting-different-environments/using-environments-for-deployment) | The pipeline, one piece at a time: sign-in with a federated credential, what-if, the approval gate, deploy. From the quickstart I take the OIDC part (the federated credential, `permissions: id-token: write`, `azure/login@v2`), not its one push-to-deploy job. | Microsoft's old *Bicep and GitHub Actions* learning path (the one the quickstart still links) is retired: its URLs redirect to the Resource Manager landing page. So there's no single course; I put the pieces together from these pages. |
+| [Azure Verified Modules](https://azure.github.io/Azure-Verified-Modules/) | The Bicep. Each module (SQL server, Container Apps, Key Vault) has a README with usage examples and secure defaults, and Microsoft maintains and versions it. | Nothing to clone. The Bicep MCP server's `list_avm_metadata` tool finds the module and its latest version. AVM's [AI-assisted solution development](https://azure.github.io/Azure-Verified-Modules/usage/ai-assisted-sol-dev/) page is an overview of letting Copilot pick AVM modules and generate the code (it leads into Spec Kit, a spec-first workflow). It has no setup steps. I already get the useful part, current module metadata, from the Bicep MCP server, and I write the Bicep myself. |
+| [Azure-Samples/bicep-github-actions](https://github.com/Azure-Samples/bicep-github-actions) | The **branch → PR (lint + what-if) → merge → approved deploy** flow. [Learn's architecture article](https://learn.microsoft.com/devops/deliver/iac-github-actions) shows the same diagram, and I borrow the idea of writing the what-if output to the run summary and a PR comment. | Its last commit was in 2022. It has one `main.bicep` with no app and pins old action versions (`azure/login@v1`), so I take the diagram and the idea, not the YAML. |
+| azd templates such as [FBoucher/AspireAzStorage](https://github.com/FBoucher/AspireAzStorage) and [azure-ai-travel-agents](https://github.com/Azure-Samples/azure-ai-travel-agents) | Nothing for this step. | Both deploy with `azd up` or `azd provision`/`azd deploy`. Neither runs a what-if or waits for an approval. AspireAzStorage writes raw resources instead of AVM and has no workflows. The travel-agents sample uses AVM, but it's a large multi-language Node and AI app. Good for a demo, not for change control at work. |
 
 ## Build it step by step
 The Angular app is its own Angular CLI workspace, next to the .NET projects, not inside one. It only calls relative `/api/*` URLs, so it doesn't know or care what backend serves it, and it would work the same behind a Java or Python BFF. The two only meet at publish time, when the Angular build output is copied into the server's `wwwroot`. damienbod's sample uses the same split (`ui/` and `server/`).
@@ -397,7 +453,16 @@ That's why Microsoft Learn shows up twice: the **MCP server** in `.mcp.json` giv
 | Microsoft Learn MCP server | [Microsoft](https://learn.microsoft.com/training/support/mcp) | Added to `.mcp.json` by hand (below) |
 | Microsoft Learn skills | [Microsoft](https://github.com/MicrosoftDocs/mcp) | `npx skills add microsoftdocs/mcp -a claude-code`: `microsoft-docs`, `microsoft-code-reference` |
 | .NET skills | [.NET team](https://github.com/dotnet/skills) | `npx skills add dotnet/skills -a claude-code`: `dotnet-webapi`, `optimizing-ef-core-queries` |
-| Later | | Test skills at the testing step; Azure and the [Bicep MCP server](https://learn.microsoft.com/azure/azure-resource-manager/bicep/bicep-mcp-server) at the infra step |
+| Bicep MCP server | [Bicep team](https://learn.microsoft.com/azure/azure-resource-manager/bicep/bicep-mcp-server) | Added to `.mcp.json` at the infra step: `dnx -y Azure.Bicep.McpServer` |
+| Later | | Test skills at the testing step |
+
+**For Bicep I add only the Bicep MCP server.** Its tools are the ones that keep generated Bicep honest: `get_bicep_best_practices`, `list_avm_metadata` (which AVM module and version), `get_az_resource_type_schema` (the real properties for an API version) and `get_bicep_file_diagnostics` (compile errors without a deploy). The VS Code Bicep extension (0.40.2+) also installs it, but only for Copilot. Claude Code needs its own entry in `.mcp.json`. `dnx` ships with the .NET 10 SDK and runs the latest NuGet package on demand, so there's nothing to install.
+
+**What `dnx` is.** The .NET version of `npx`: [`dnx <package>`](https://learn.microsoft.com/dotnet/core/tools/dotnet-tool-exec) (short for `dotnet tool exec`) downloads a .NET *tool* package from NuGet into the NuGet cache (`~/.nuget/packages`) and runs it. It isn't added to any project or to PATH. `-y` skips the "download this package?" prompt, which matters here because Claude Code starts the server in the background where nobody can answer it. With no version it runs the latest, which suits an AI helper; `Azure.Bicep.McpServer@0.48.1` would pin it. NuGet has two kinds of packages, and they install differently:
+- **Libraries** (EF Core, Aspire integrations) are always per project, a `<PackageReference>` in a `.csproj`. They're downloaded once into `~/.nuget/packages` and shared by every project that uses that version. There's no "global library".
+- **Tools** (`dotnet-ef`, the Bicep MCP server) are command-line apps. They can be global (`dotnet tool install -g`, into `~/.dotnet/tools`), per repo (a `.config/dotnet-tools.json` manifest), pinned by mise (how I pin `dotnet-ef`), or run on demand with `dnx`.
+
+I skipped Microsoft's [Azure Skills plugin](https://github.com/microsoft/azure-skills) (`azure-prepare`, `azure-deploy` and others, plus the Azure MCP server). Its skills are built to generate infra and *run* deployments for you, mostly through azd. I want to write the Bicep myself and have only the pipeline deploy, with the az CLI. The [Learn agent skills](https://learn.microsoft.com/training/support/agent-skills) are docs links I already get through the Learn MCP server.
 
 For every `npx skills add` I picked **Project** scope. The skills are copied into `.claude/skills/`, and `skills-lock.json` records each one's source and hash. Both are committed, so anyone who clones the repo gets the same guidance. The `dotnet/skills` repo offers 110 skills (Blazor, MAUI, MSBuild and more); I took only the ones this app uses.
 
@@ -414,14 +479,21 @@ My `.mcp.json` at the repo root:
     "microsoft-learn": {
       "type": "http",
       "url": "https://learn.microsoft.com/api/mcp"
+    },
+    "bicep": {
+      "command": "dnx",
+      "args": ["-y", "Azure.Bicep.McpServer"]
     }
   }
 }
 ```
+I added the `bicep` entry by hand at the infra step (see the note on `dnx` above).
 
 What each server gives Claude:
 - **Angular CLI** (`npx @angular/cli mcp`) runs on my machine because it reads my workspace. It finds the projects in `angular.json` and the installed Angular version, then answers *for that version*: `get_best_practices`, `search_documentation` (angular.dev), `ai_tutor`, plus migration helpers such as `onpush_zoneless_migration`. `--read-only` turns off the tools that change files or run commands.
 - **Microsoft Learn** is a server Microsoft hosts. Claude Code, the MCP client, sends tool calls to `https://learn.microsoft.com/api/mcp` over HTTP and gets back doc excerpts, full pages or code samples. Claude never browses the site itself.
+
+**Picking up a new server.** Claude Code reads `.mcp.json` when a session starts, so after editing it I start a new session (in VS Code: Developer: Reload Window), approve the new server, and check `/mcp`. The **Start** button VS Code shows above each server in `.mcp.json` comes from VS Code's own MCP support. It starts the server for Copilot Chat, not for Claude Code.
 
 **Check they're working.** I don't run this in the terminal. I type `/mcp` in the Claude Code chat. It lists each server from `.mcp.json` as connected or failed, and I can open one to see its tools. Then I test each one for real by asking Claude to "list the Angular projects in this repo", which should call `list_projects` and find `ui` in `src/ui`, and to "search Microsoft Learn for Aspire AddJavaScriptApp". When I first open a repo with a new `.mcp.json`, Claude Code asks me to approve its servers. After that it doesn't ask again, so not being asked doesn't mean they're broken.
 
