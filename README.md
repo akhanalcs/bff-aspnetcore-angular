@@ -245,12 +245,13 @@ Note: a script on *another* site can never read my cookies; the browser's same-o
 
 ## Angular conventions
 I follow Angular's own [style guide](https://angular.dev/style-guide) and its [best practices for AI-assisted code](https://angular.dev/ai/develop-with-ai). In short:
-- **Files:** hyphenated names (`order-list.ts`), one concept per file, tests next to the code (`order-list.spec.ts`), folders by feature (`orders/`), not by type (`components/`).
+- **Files:** hyphenated names (`order-list.ts`), one concept per file, tests next to the code (`order-list.spec.ts`), folders by feature, not by type (`components/`, `services/`). Feature folders sit straight under `src/app/` (`repair-orders/`, later `home/`), with no `features/` wrapper: the [style guide's example](https://angular.dev/style-guide#organize-your-project-by-feature-areas) does the same, and when every folder is a feature, the wrapper adds a level that says nothing. A folder gets subfolders only when it grows too big to scan.
 - **Components:** standalone (no NgModules, no `standalone: true`), `input()` / `output()` / `model()` instead of decorators, `computed()` for derived state, `host: {}` instead of `@HostBinding`.
 - **State:** signals; `set()` / `update()`, never mutate.
 - **Templates:** `@if` / `@for` / `@switch`; `[class.x]` and `[style.x]` instead of `ngClass` / `ngStyle`; complex logic moves into a `computed()`.
 - **Members:** `inject()` instead of constructor injection; `protected` for what only the template reads; `readonly` for inputs, outputs and queries.
 - **Routes:** lazy-loaded per feature.
+- **Creating files:** components with the CLI (`npx ng generate component repair-orders/order-list --flat`), so every component gets the same four files (`.ts`, `.html`, `.css`, `.spec.ts`), the `app-` selector prefix and the current conventions. `--flat` puts them straight into the feature folder instead of a folder per component. Plain TypeScript files (types, small helpers) I write by hand; `ng generate interface` would only create an empty `export interface`.
 - **Accessibility:** WCAG AA and AXE checks pass.
 
 ## Roadmap
@@ -748,3 +749,93 @@ npx ng add @angular/material      # picked the Cyan/Orange palettes
 - `angular.json` is the **Angular CLI's** workspace file: *how to build, serve and test each project*: the entry file, which global styles and assets go in, production budgets and optimizations, the dev server's options.
 
 In .NET terms, `package.json` is like the `<PackageReference>` list, and `angular.json` is like the build settings in a `.csproj` plus `launchSettings.json`.
+
+**4e-2. A toolbar and the order list page**
+
+How I got here: the component files came from the CLI, and I wrote the rest by hand.
+```bash
+cd ~/RiderProjects/bff-aspnetcore-angular/src/ui
+npx ng generate component repair-orders/order-list --flat   # order-list .ts/.html/.css/.spec.ts
+```
+Then:
+- [`repair-orders/repair-order.ts`](src/ui/src/app/repair-orders/repair-order.ts) (by hand): the shape of one row from the API. `RepairOrderStatus` is a **string literal union type**: a value must be one of those four strings, and the compiler checks every use. The closest thing in C# is an `enum`, but this one is made of the actual strings the API sends, and it disappears at compile time (JavaScript has no types). It's hand-written until roadmap 4 generates types from the API's OpenAPI document.
+- [`repair-orders/order-list.ts`](src/ui/src/app/repair-orders/order-list.ts): `httpResource` loads `GET /api/repair-orders` when the page opens and exposes `value()`, `isLoading()` and `error()` as signals. No subscribe, no unsubscribe.
+- [`order-list.html`](src/ui/src/app/repair-orders/order-list.html): a progress bar while loading, an error message if it fails, otherwise a Material table. The comments in the template explain the table's pieces (column definitions vs. row definitions).
+- `DatePipe` turns the API's UTC timestamp into the viewer's local time (`Nov 1, 2026, 3:16:22 PM` here in Nepal). It's a *pure* pipe: Angular re-runs it only when the value it gets changes, so it isn't re-formatting every row on every change detection.
+- [`app.routes.ts`](src/ui/src/app/app.routes.ts): `''` redirects to `repair-orders` until there's a home page. The route is **lazy-loaded**: the build puts the page in its own JS chunk (`order-list`, 12.5 kB compressed, separate from the 87 kB initial bundle), and the browser downloads it from the server the first time someone opens the page (from `ng serve` through YARP in dev; from the server's `wwwroot` in production). The component's `selector` (`app-order-list`) isn't used in any template, because the router creates the component itself; it's still the tag name of the element the router inserts next to `<router-outlet>`, which is what I see in DevTools.
+- [`app.html`](src/ui/src/app/app.html) / [`app.ts`](src/ui/src/app/app.ts) / [`app.css`](src/ui/src/app/app.css): the shell. I replaced the CLI's placeholder (which ended in a bare `<router-outlet />`) with a `mat-toolbar` and `<main><router-outlet /></main>`. `<main>` is the page's main landmark, so screen readers can jump straight to the content, and it gives the routed pages one centered, padded column (`margin: 0 auto` splits the leftover width equally between left and right).
+- `app.spec.ts`: the CLI's "should render title" test checked the placeholder's `<h1>`, so it now checks the toolbar instead.
+
+What I got: the 5 orders in a dark Material table on `https://localhost:7282/repair-orders`. The browser calls `/api/repair-orders` on the **same origin** as the page, so there's no CORS setup and no API URL to configure. That's the payoff of 4c: one origin, with the server in front of everything.
+
+**How Material's colors work (no magic)**
+
+*The file format.* [`material-theme.scss`](src/ui/src/material-theme.scss) is **Sass** (SCSS syntax), not plain CSS: CSS plus variables, functions and **mixins**. A mixin is a reusable block of CSS that takes arguments; `@include mat.theme(...)` runs the `theme` mixin from `@use '@angular/material' as mat`, and the build turns the whole file into plain CSS. Cmd+click doesn't work on `mat.theme` because VS Code doesn't resolve Sass modules from `node_modules` (a Sass extension such as "Some Sass" adds that). The mixin is in `node_modules/@angular/material/core/tokens/_system.scss`; `node_modules/@angular/material/_index.scss` re-exports it as `mat.theme`.
+
+*Tokens.* "Token" is a design-system word: a **named design decision**, like "the page background color" or "the title font size", stored once and used everywhere instead of repeating raw values. Change the token and everything that uses it changes. Material stores its tokens as CSS custom properties.
+
+*CSS custom properties.* Every Material component draws itself from **CSS custom properties**: variables whose names start with `--`, read with `var(--name)`. A property set on an element is inherited by everything inside it. There are two layers:
+1. **System tokens, `--mat-sys-*`:** the theme's whole palette and type scale. `mat.theme(...)` writes them all onto `<html>`, so every element can read them. Each color is `light-dark(<light value>, <dark value>)`; `color-scheme: dark` on `<body>` picks the second. That one line is the only thing I changed: it chooses *dark mode*, not any particular color. The list and what each one is for: [System variables](https://material.angular.dev/guide/system-variables) and [Theming your components](https://material.angular.dev/guide/theming-your-components).
+2. **Component tokens, `--mat-<component>-*`:** one per thing you can change on a component. Material's toolbar CSS says `background-color: var(--mat-toolbar-container-background-color, var(--mat-sys-surface))`: "use the toolbar token if someone set it, otherwise the system surface color". The page's background is also `--mat-sys-surface`, which is why my toolbar blended in. Each component's **Styling** tab on material.angular.dev lists its tokens. I found this one in Material's own files: the defaults are in `node_modules/@angular/material/toolbar/_m3-toolbar.scss` (`toolbar-container-background-color: surface`), and the `var(...)` line above is in the compiled `node_modules/@angular/material/fesm2022/toolbar.mjs`.
+
+<img src="docs/images/devtools-toolbar-tokens.png" alt="Firefox DevTools on the toolbar: --mat-toolbar-container-background-color set to var(--mat-sys-surface-container); the html rule from material-theme.scss lists --mat-sys-surface light-dark(#f7faf9, #101414) and --mat-sys-surface-container light-dark(#ebefed, #1c2020); 'Show 156 unused custom CSS properties'" width="900">
+
+DevTools crosses out whatever isn't in effect. In the toolbar's own rule, `var(--mat-sys-surface)` is crossed out because it's only the fallback, and the toolbar token is set, so the fallback isn't used. Each component's **Styling** tab on [material.angular.dev](https://material.angular.dev/components/toolbar/styling) lists its tokens with a description and default, so normally I find a token there (or in DevTools) and never open `node_modules`.
+
+DevTools shows the whole chain: the toolbar rule sets `--mat-toolbar-container-background-color` to `var(--mat-sys-surface-container)`; **Jump to variable declaration** leads to the `html` rule from `material-theme.scss` (that's `mat.theme`'s output), where `--mat-sys-surface` is `#101414` in dark mode and `--mat-sys-surface-container` is `#1c2020`, one step lighter. "Show 156 unused custom CSS properties" means `mat.theme` defined many more system tokens than this element uses; they're the full palette, ready for every other component.
+
+*Where `color-scheme: dark` goes.* `ng add` generates `color-scheme: light` on `<body>` (its template is in `node_modules/@angular/material/schematics/ng-add/theming/create-theme.js`, with a comment saying to change it to `dark` or `light dark`), and I changed that one word to `dark`. Material's [theming guide](https://material.angular.dev/guide/theming) puts `color-scheme` on `<html>` instead, so I checked in a real browser (Chromium, via Playwright) whether it matters:
+- **The page looks the same either way.** With it on `<body>` or on `<html>`, the body and an element inside it both computed to `rgb(16, 20, 20)`, which is `#101414`, the dark surface. The `--mat-sys-*` variables are declared on `<html>`, but a variable's `light-dark()` is resolved where it's *used*, and everything visible is inside `<body>`.
+- **What differs is `<html>` itself.** With it on `<body>`, `<html>` stays at the default scheme (`normal`, meaning light). That affects the browser's own parts tied to the root, like the page scrollbars, and it's why Firefox DevTools, which shows the `html` rule evaluated against `<html>`, crossed out the dark `#101414` and kept the light `#f7faf9`, the opposite of the screen.
+
+I kept it on `<body>`, where `ng add` generated it: content and colors are right, and it's the generated code. If light scrollbars on a dark page ever bother me, moving the line into the `html` block fixes that and the DevTools display.
+
+*Why a system token and not my own color.* I could write `#1c2020` directly and it would look the same today. `var(--mat-sys-surface-container)` is better because it **follows the theme**: change the palette or switch to light mode, and the toolbar changes with it (in light mode it becomes `#ebefed` automatically). A hard-coded color would stay dark in a light theme. The same goes for my own CSS: `.error` uses `var(--mat-sys-error)`, not a red I picked, so it matches Material's error color in both modes. Material's docs say exactly this: system tokens keep custom styles in the app's color scheme and handle light and dark mode automatically.
+
+*`.mat-bg-primary-container` in Material's docs* is a **utility class**, a one-line class that applies one system token (`background-color: var(--mat-sys-primary-container)`). Material ships a set of them, but only if the theme file includes `@include mat.system-classes()`. I don't, so those classes don't exist in this app. I use the `var(--mat-sys-...)` tokens directly in my own CSS instead, which is what the utility classes do inside.
+
+*Two ways to set a component token:*
+
+| | Plain CSS in the component's stylesheet (what I use) | `mat.toolbar-overrides(...)` in the Sass theme file |
+|---|---|---|
+| Where it lives | Next to the element it styles (`app.css`, which owns the toolbar) | In the global theme file |
+| Typo in the token name | Silently does nothing | Build fails and lists the valid names |
+| If Material renames a token in a future version | Silently stops working | The mixin keeps old names working, or the build tells me |
+| Output | `--mat-toolbar-container-background-color: ...` | Exactly the same CSS |
+
+I keep it in [`app.css`](src/ui/src/app/app.css), with the component that owns the toolbar. The trade-off is that nothing checks the name, so when I upgrade Material I check the toolbar still looks right. If the app grows many Material overrides, moving them into the theme file with the `*-overrides` mixins is the safer place.
+
+**The Material table, compared with a plain HTML table.** A plain table is written row by row, and I'd loop over the rows myself:
+```html
+<table>
+  <tr><th>Unit</th><th>Complaint</th></tr>                 <!-- mat-header-row -->
+  @for (order of orders.value(); track order.id) {
+    <tr><td>{{ order.unitNumber }}</td><td>{{ order.complaint }}</td></tr>   <!-- mat-row -->
+  }
+</table>
+```
+`mat-table` is written **column by column**: each `matColumnDef` holds that column's header cell and body cell (Part 1), and the two row lines at the end say which columns to show and in what order (Part 2). The table then builds the plain version above for me: DevTools shows a normal `<thead>` with one `<tr>` of `<th>`s (each header cell template used once) and a `<tbody>` with one `<tr>` per order, each with a `<td>` per column (each body cell template used once per order). The `<!--ng-container-->` comments are **bookmarks**: Angular leaves an invisible comment node where it inserted a template, so when the data changes (a new order arrives, a column is hidden) it knows exactly where to add or remove rows and cells without rebuilding the table. `<ng-container>` itself never becomes an element, and that's its point here: a table only allows certain tags in certain places (`<tr>` holds only `<th>`/`<td>`), so a wrapper `<div>` around a column's cells would be invalid HTML. `<ng-container>` groups things in the template without adding anything to the page.
+
+For a fixed five-column list, the plain version would be simpler. The column-by-column design pays off when columns change at runtime: hiding or reordering a column is just editing the `columns` array, and `MatSort`, `MatPaginator` and sticky headers plug into the column definitions. The list gets sorting and paging in roadmap 4, which is why I used `mat-table` from the start.
+
+**The `*` and `*matRowDef="let order; columns: columns"`.** A `*` in front of an attribute means **"this element is a template, not something to render once"**. Angular rewrites it:
+```html
+<tr mat-row *matRowDef="let order; columns: columns"></tr>
+<!-- becomes -->
+<ng-template matRowDef let-order [matRowDefColumns]="columns">
+  <tr mat-row></tr>
+</ng-template>
+```
+The part in quotes is Angular's **microsyntax**; `;` just separates its pieces:
+- `let order` declares the loop variable, like `var order` in `foreach (var order in orders)`. The table fills it with each item of `[dataSource]`.
+- `columns: columns` is `name: value`. The name `columns` becomes the directive's input `matRowDefColumns`; the value is my component's `columns` array. If my field were `myColumns`, I'd write `columns: myColumns`.
+
+`@for` and `@if` (Angular's built-in control flow) replaced most uses of `*` in my own templates; libraries like the Material table still use it. Cmd+clicking `*matRowDef` opens the package's `.d.ts`, which is generated type information (the `ɵ` names are Angular's compiler internals), so the [table docs](https://material.angular.dev/components/table/overview) are the place to read about it instead.
+
+**Where the routed page goes.** The router doesn't put the page *inside* `<router-outlet>`; it inserts the page's element right **after** it, as a sibling. The element's tag is the component's `selector`, `app-order-list`. That's the one place the selector is used: no template writes `<app-order-list>`, because the router creates the component from the class.
+
+<img src="docs/images/devtools-router-outlet.png" alt="DevTools: inside main, an empty router-outlet element followed by its sibling app-order-list" width="600">
+
+**Bump:** VS Code showed `'mat-toolbar' is not a known element` in `app.html` even though `npx ng build` passed. The Angular Language Service had checked the template before I added `MatToolbarModule` to `imports`. **Developer: Reload Window** cleared it. When the editor and the build disagree, the build is right.
+
+**Bump:** Firefox's Inspector showed "Style sheet could not be loaded" after I edited `material-theme.scss`. Every stylesheet on the page loaded fine (`styles.css`, its source map and both Google Fonts files all return 200). It stayed after a hard reload (Cmd+Shift+R) with DevTools open, so it's DevTools failing to fetch some sheet's source for its own display, not the page. The page is styled correctly, so I left it.

@@ -7,6 +7,7 @@
 
 html {
   height: 100%;
+  // mat.theme declares the --mat-sys-* variables on <html>
   @include mat.theme(
     (
       color: (
@@ -20,9 +21,10 @@ html {
 }
 
 body {
-  // Default the application to a dark color theme. This can be changed to
-  // `light` to enable the light color theme, or to `light dark` to defer to the
+  // Default the application to a light color theme. This can be changed to
+  // `dark` to enable the dark color theme, or to `light dark` to defer to the
   // user's system settings.
+  // I changed it to dark.
   color-scheme: dark;
 
   // Set a default background, font and text colors for the application using

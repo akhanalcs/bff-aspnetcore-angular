@@ -1,0 +1,6 @@
+.error {
+  /* --mat-sys-error is a CSS custom property (any name starting with -- is one). Material's
+   theme (material-theme.scss) defines all the --mat-sys-* ones on <html>, so every element
+   inherits them; var() reads one. This one is the theme's error red, already tuned for dark mode. */
+  color: var(--mat-sys-error);
+}

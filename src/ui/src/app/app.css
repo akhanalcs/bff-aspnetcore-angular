@@ -1,0 +1,14 @@
+mat-toolbar {
+  gap: 12px;
+  /* Material reads the toolbar's background from this token. Its default is the page's own color
+     (--mat-sys-surface), so the toolbar blended in. surface-container is the theme's next lighter
+     shade, and as a theme token it also adjusts if the theme or light/dark mode changes.
+     Nothing checks this name: after upgrading Material, check the toolbar still looks right. */
+  --mat-toolbar-container-background-color: var(--mat-sys-surface-container);
+}
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 24px;
+}

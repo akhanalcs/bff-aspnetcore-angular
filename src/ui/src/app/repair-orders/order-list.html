@@ -1,0 +1,55 @@
+<h1>Repair orders</h1>
+
+@if (orders.isLoading()) {
+  <mat-progress-bar mode="indeterminate" />
+}
+
+@if (orders.error()) {
+  <p class="error">Couldn't load the repair orders. Try again in a moment.</p>
+} @else {
+  <!-- [dataSource] is a property binding: the [] make Angular evaluate orders.value() as TypeScript
+       and pass the result (the array). Without them, dataSource would get the literal text
+       "orders.value()". It re-renders when the signal changes. -->
+  <table mat-table [dataSource]="orders.value()">
+    <!-- Part 1: column definitions, one per column. Each holds two templates: the header cell
+         (*matHeaderCellDef, used once, in the header row) and the body cell (*matCellDef, used once
+         per order). A * means "template, not rendered as is": the table copies it wherever it's needed.
+         In the page (viewed using DevTools), Angular leaves only a ng-container comment: an invisible bookmark marking
+         where it inserted the cells, so it can add or remove rows there when the data changes.
+         A <div> wrapper here would be invalid HTML; a <tr> may only hold <th>/<td>.
+         "let order" names the row's object, so the cell can read order.unitNumber. -->
+    <ng-container matColumnDef="unitNumber">
+      <th mat-header-cell *matHeaderCellDef>Unit</th>
+      <td mat-cell *matCellDef="let order">{{ order.unitNumber }}</td>
+    </ng-container>
+
+    <ng-container matColumnDef="complaint">
+      <th mat-header-cell *matHeaderCellDef>Complaint</th>
+      <td mat-cell *matCellDef="let order">{{ order.complaint }}</td>
+    </ng-container>
+
+    <ng-container matColumnDef="status">
+      <th mat-header-cell *matHeaderCellDef>Status</th>
+      <td mat-cell *matCellDef="let order">{{ order.status }}</td>
+    </ng-container>
+
+    <!-- | is the pipe operator: it passes the value on its left through a formatter (DatePipe here).
+         'medium' is one of DatePipe's preset formats (short, medium, long, full, shortDate, ...), or use a
+         pattern like 'yyyy-MM-dd HH:mm'. All of them: https://angular.dev/api/common/DatePipe
+         It shows the API's UTC time in the viewer's own time zone. DatePipe is pure: Angular formats
+         each value once and re-runs it only when the value itself changes, not on every screen update. -->
+    <ng-container matColumnDef="createdAt">
+      <th mat-header-cell *matHeaderCellDef>Created</th>
+      <td mat-cell *matCellDef="let order">{{ order.createdAt | date: 'medium' }}</td>
+    </ng-container>
+
+    <!-- Part 2: row definitions. They pick WHICH columns appear, in order, from the columns array.
+         The header row is drawn once. The body row is the loop, like
+           foreach (var order in dataSource) { <tr> with a cell per column </tr> }
+         In "let order; columns: columns" the ; separates two parts: "let order" is the loop variable,
+         and "columns: columns" means "set this row's columns input to my columns field"
+         (with a field named myColumns it would read columns: myColumns). -->
+    <tr mat-header-row *matHeaderRowDef="columns"></tr>
+    <tr mat-row *matRowDef="let order; columns: columns"></tr>
+  </table>
+}
